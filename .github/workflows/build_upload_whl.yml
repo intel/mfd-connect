@@ -1,0 +1,205 @@
+name: CI Build Reusable Workflow
+on:
+  workflow_call:
+    secrets:
+      GH_TOKEN:
+        description: 'GitHub token for authentication'
+        required: true
+      PYPI_TOKEN:
+        description: 'PyPI API token to publish package'
+        required: false
+    inputs:
+      UPLOAD_PACKAGE:
+        description: 'Should the package be uploaded to PyPI?'
+        required: false
+        default: false
+        type: boolean
+      REPOSITORY_NAME:
+        description: 'Repository name'
+        required: false
+        type: string
+      BRANCH_NAME:
+        description: 'Branch name to checkout'
+        required: true
+        type: string
+      PYTHON_VERSION:
+        description: 'Python version to use'
+        required: false
+        default: '3.10.11'
+        type: string
+      PUSH_TAG:
+        description: 'Push tag after version bump'
+        required: false
+        default: false
+        type: boolean
+      RELEASE_BUILD:
+        description: 'Is release build?'
+        required: false
+        default: false
+        type: boolean
+      GIT_USER:
+        description: 'Git user name for commit and tag'
+        required: true
+        type: string
+      GIT_EMAIL:
+        description: 'Git user email for commit and tag'
+        required: true
+        type: string
+      PROJECT_NAME:
+        description: 'Project name for tests'
+        required: true
+        type: string
+      SOURCE_PATH:
+        description: 'Path to the source code directory'
+        required: false
+        default: 'src'
+        type: string
+      RUNS_ON:
+        description: 'Runner type for the job'
+        required: false
+        default: 'ubuntu-latest'
+        type: string
+
+jobs:
+  build_whl:
+    permissions:
+      contents: write
+      id-token: write
+    environment:
+      name: "pypi"
+      url: https://pypi.org/p/${{ inputs.PROJECT_NAME }}
+    runs-on: ${{ inputs.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+          path: ${{ inputs.SOURCE_PATH }}
+          ref: ${{ inputs.BRANCH_NAME }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Version bumping
+        id: VERSION_BUMP
+        if: inputs.RELEASE_BUILD == true
+        env:
+          GIT_AUTHOR_NAME: ${{ inputs.GIT_USER }}
+          GIT_AUTHOR_EMAIL: ${{ inputs.GIT_EMAIL }}
+          GIT_COMMITTER_NAME: ${{ inputs.GIT_USER }}
+          GIT_COMMITTER_EMAIL: ${{ inputs.GIT_EMAIL }}
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m venv bump_version
+          source bump_version/bin/activate
+          pip install python-semantic-release~=10.2
+          pip install -r ${{ inputs.SOURCE_PATH }}/requirements-dev.txt
+          mfd-create-config-files --project-dir ./${{ inputs.SOURCE_PATH }}
+          cd ${{ inputs.SOURCE_PATH }}
+          version_after_bump=$(semantic-release version --print | tail -n 1 | tr -d '\n')
+          version_from_tag=$(git describe --tags --abbrev=0 | tr -d '\n' | sed 's/^v//')
+          echo "Version after semantic-release bump is: ${version_after_bump}"
+          echo "Version from tag: ${version_from_tag}"
+          # Only check version equality if RELEASE_BUILD is true
+          if [ "${{ inputs.RELEASE_BUILD }}" == "true" ]; then
+            if [ "$version_after_bump" == "$version_from_tag" ]; then
+              echo "Version would not change: version_after_bump=${version_after_bump}, version_from_tag=${version_from_tag}"
+              exit 1
+            fi
+          fi
+          semantic-release version --no-push --no-vcs-release
+          cat pyproject.toml
+          echo "version_after_bump=v${version_after_bump}" >> $GITHUB_OUTPUT
+      - name: Create virtual environment for whl creation
+        shell: bash
+        run: |
+          python -m venv whl_creation
+          source whl_creation/bin/activate
+          pip install build==1.2.2.post1
+          cd ${{ inputs.SOURCE_PATH }}
+          ../whl_creation/bin/python -m build --wheel --outdir ../whl_creation/dist
+          ls -l ../whl_creation/dist
+
+      - name: Determine if unit and functional tests should run
+        id: test_check
+        shell: bash
+        run: |
+          REPO_NAME=$(echo "${{ inputs.PROJECT_NAME }}")
+          echo "Repository name extracted: $REPO_NAME"
+
+          UNIT_TEST_DIR="${{ inputs.SOURCE_PATH }}/tests/unit/test_$(echo "${REPO_NAME}" | tr '-' '_')"
+          FUNC_TEST_DIR="${{ inputs.SOURCE_PATH }}/tests/system/test_$(echo "${REPO_NAME}" | tr '-' '_')"
+          if [ -d "$UNIT_TEST_DIR" ]; then
+            echo "Unit tests directory exists: $UNIT_TEST_DIR"
+            echo "run_unit_tests=true" >> $GITHUB_OUTPUT
+          else
+            echo "Unit tests directory does not exist: $UNIT_TEST_DIR"
+            echo "run_unit_tests=false" >> $GITHUB_OUTPUT
+          fi
+          if [ -d "$FUNC_TEST_DIR" ]; then
+            echo "Functional tests directory exists: $FUNC_TEST_DIR"
+            echo "run_functional_tests=true" >> $GITHUB_OUTPUT
+          else
+            echo "Functional tests directory does not exist: $FUNC_TEST_DIR"
+            echo "run_functional_tests=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install dependencies for tests
+        if: steps.test_check.outputs.run_unit_tests == 'true' || steps.test_check.outputs.run_functional_tests == 'true'
+        shell: bash
+        run: |
+          python -m venv test_env
+          source test_env/bin/activate
+          python -m pip install -r "${{ inputs.SOURCE_PATH }}/requirements.txt" -r "${{ inputs.SOURCE_PATH }}/requirements-test.txt" -r "${{ inputs.SOURCE_PATH }}/requirements-dev.txt"
+
+      - name: Run unit tests if test directory exists
+        if: steps.test_check.outputs.run_unit_tests == 'true'
+        shell: bash
+        run: |
+          source test_env/bin/activate
+          mfd-unit-tests --project-dir ${{ github.workspace }}/${{ inputs.SOURCE_PATH }}
+
+      - name: Run functional tests if test directory exists
+        if: steps.test_check.outputs.run_functional_tests == 'true'
+        shell: bash
+        run: |
+          source test_env/bin/activate
+          mfd-system-tests --project-dir ${{ github.workspace }}/${{ inputs.SOURCE_PATH }}
+      - name: Publish package distributions to PyPI
+        if: ${{ inputs.RELEASE_BUILD == true && inputs.UPLOAD_PACKAGE == true }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: 'whl_creation/dist'
+          password: ${{ secrets.PYPI_TOKEN }}
+
+      - name: Publish comment how to build .whl
+        if: inputs.RELEASE_BUILD == false
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const commentBody = "We don't publish DEVs .whl.\n To build .whl, run 'pip install git+https://github.com/${{ inputs.REPOSITORY_NAME }}@${{ inputs.BRANCH_NAME }}'";
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: commentBody
+            });
+
+      - name: Push git tag after version bump
+        if: ${{ inputs.RELEASE_BUILD == true && inputs.PUSH_TAG == true }}
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: ${{ inputs.GIT_USER }}
+          GIT_AUTHOR_EMAIL: ${{ inputs.GIT_EMAIL }}
+          GIT_COMMITTER_NAME: ${{ inputs.GIT_USER  }}
+          GIT_COMMITTER_EMAIL: ${{ inputs.GIT_EMAIL }}
+          version_after_bump: ${{ steps.VERSION_BUMP.outputs.version_after_bump }}
+        run: |
+          cd ${{ inputs.SOURCE_PATH }}
+          git push origin "${version_after_bump}"

@@ -1,0 +1,14 @@
+pexpect~=4.8.0
+paramiko==3.4.0; platform_system != 'VMkernel'
+six
+rpyc~=6.0.0
+funcy~=1.14
+scp~=0.13.4; platform_system != 'VMkernel'
+pywin32; sys_platform == 'win32'
+mfd-typing >= 1.23.0, < 2
+mfd-common-libs>=1.11.0
+psutil~=5.9.5; platform_system != 'VMkernel'
+mfd-ftp>=1.8.0
+pywinrm~=0.4.3
+netaddr
+telnetlib-313-and-up; python_version >= '3.13'
