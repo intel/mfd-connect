@@ -1,0 +1,38 @@
+# Unix-like OS (Linux, MacOS, BSD, etc.)
+# `tool/package` or `tool - corresponding package`
+awk - gawk
+base64 - coreutils
+cat - coreutils
+chmod - coreutils
+chown - coreutils
+cp - cp
+curl
+cut - coreutils
+diff - diffutils
+dmidecode
+getent - glibc-utils
+grep
+hostname
+kill - procps / sysvinit-utils
+ls - coreutils
+md5sum - coreutils
+mv - coreutils
+nohup - coreutils
+pgrep - procps / sysvinit-utils
+pidof - procps / sysvinit-utils
+pkill - procps / sysvinit-utils
+ps - procps / sysvinit-utils
+readlink - coreutils
+rm - coreutils
+sed
+split - coreutils
+ssh-keyscan - ssh/openssh/openssh-client
+sshpass - ssh/openssh/openssh-client
+stty
+touch - coreutils
+uname - coreutils
+unzip
+uptime - procps / sysvinit-utils
+echo - coreutils
+test - coreutils
+rmdir - coreutils

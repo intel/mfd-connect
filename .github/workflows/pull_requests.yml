@@ -1,0 +1,29 @@
+name: DEV BUILD
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  build_upload_whl:
+    strategy:
+      matrix:
+        include:
+          - name: python-version-3-10
+            python_version: '3.10'
+            push_tag: false
+          - name: python-version-3-13
+            python_version: '3.13'
+            push_tag: false
+    uses: ./.github/workflows/build_upload_whl.yml
+    secrets:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+    with:
+      REPOSITORY_NAME: ${{ github.repository }}
+      BRANCH_NAME: ${{ github.head_ref }}
+      PYTHON_VERSION: ${{ matrix.python_version }}
+      PUSH_TAG: ${{ matrix.push_tag }}
+      RELEASE_BUILD: false
+      GIT_USER: 'mfd-intel-bot'
+      GIT_EMAIL: 'mfd_intel_bot@intel.com'
+      PROJECT_NAME: 'mfd-connect'
