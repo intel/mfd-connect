@@ -12,7 +12,7 @@ dependencies = { file = ["requirements.txt"] }
 name = "mfd-connect"
 description = "Module for running commands on remote machine."
 requires-python = ">=3.10, <3.14"
-version = "7.11.0"
+version = "7.12.0"
 dynamic = ["dependencies"]
 license-files = ["LICENSE.md", "AUTHORS.md"]
 readme = {file = "README.md", content-type = "text/markdown"}
