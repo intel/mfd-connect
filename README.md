@@ -4,6 +4,7 @@
 # MFD Connect
 **Module for running commands on remote machine.**
 
+[![Coverage Status](https://coveralls.io/repos/github/intel/mfd-connect/badge.svg)](https://coveralls.io/github/intel/mfd-connect)
 ## Usage
 ```python
 from mfd_connect import LocalConnection

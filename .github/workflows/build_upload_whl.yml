@@ -123,6 +123,7 @@ jobs:
           cd ${{ inputs.SOURCE_PATH }}
           ../whl_creation/bin/python -m build --wheel --outdir ../whl_creation/dist
           ls -l ../whl_creation/dist
+          rm -rf *.egg-info
 
       - name: Determine if unit and functional tests should run
         id: test_check
@@ -163,6 +164,16 @@ jobs:
           source test_env/bin/activate
           mfd-unit-tests --project-dir ${{ github.workspace }}/${{ inputs.SOURCE_PATH }}
 
+      - name: Run unit tests with coverage if test directory exists
+        if: steps.test_check.outputs.run_unit_tests == 'true'
+        shell: bash
+        run: |
+          source test_env/bin/activate
+          mfd-unit-tests-with-coverage --project-dir ${{ github.workspace }}/${{ inputs.SOURCE_PATH }}
+      
+      - name: Coveralls GitHub Action
+        uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b #v2.3.6
+        
       - name: Run functional tests if test directory exists
         if: steps.test_check.outputs.run_functional_tests == 'true'
         shell: bash
