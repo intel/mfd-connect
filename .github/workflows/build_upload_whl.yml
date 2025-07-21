@@ -123,6 +123,7 @@ jobs:
           cd ${{ inputs.SOURCE_PATH }}
           ../whl_creation/bin/python -m build --wheel --outdir ../whl_creation/dist
           ls -l ../whl_creation/dist
+          rm -rf *.egg-info
 
       - name: Determine if unit and functional tests should run
         id: test_check

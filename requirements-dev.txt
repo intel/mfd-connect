@@ -1,3 +1,3 @@
 -r requirements-test.txt  # Ensure tests dependencies are automatically included
 pydantic
-mfd-code-quality >= 1.2.0, < 2
+mfd-code-quality @ git+https://github.com/intel/mfd-code-quality.git@coverage-debug
