@@ -515,6 +515,7 @@ class SSHConnection(AsyncConnection):
         custom_exception: Type[CalledProcessError] = None,
         reconnect_attempts: int = 5,
         attempt_delay: int = 6,
+        get_pty: bool = False,
     ) -> "ConnectionCompletedProcess":
         """
         Run program and wait for its completion.
@@ -534,6 +535,7 @@ class SSHConnection(AsyncConnection):
         :param custom_exception: Enable us to raise our exception if program exits with an unexpected return code.
         :param reconnect_attempts: Number of attempts to reconnect to the host if connection is lost.
         :param attempt_delay: Delay between reconnection attempts.
+        :param get_pty: Request a pseudo-terminal from the server.
         custom_exception must inherit from CalledProcessError to use its fields like returncode, cmd, output, stderr
 
         :return: ConnectionCompletedProcess object
@@ -556,6 +558,13 @@ class SSHConnection(AsyncConnection):
             shell=shell,
         )
 
+        if get_pty:
+            logger.log(
+                level=log_levels.MFD_INFO,
+                msg="[Warning] A pseudo-terminal was requested, "
+                    "but please be aware that this is not recommended and may lead to unexpected behavior.",
+            )
+
         self._verify_command_correctness(command)
         command = self._adjust_command(command)
 
@@ -572,7 +581,7 @@ class SSHConnection(AsyncConnection):
                 stderr_to_stdout=stderr_to_stdout,
                 discard_stdout=discard_stdout,
                 discard_stderr=discard_stderr,
-                get_pty=False,
+                get_pty=get_pty,
             )
             success_execution = True
         except Exception as e:
@@ -606,7 +615,7 @@ class SSHConnection(AsyncConnection):
                 stderr_to_stdout=stderr_to_stdout,
                 discard_stdout=discard_stdout,
                 discard_stderr=discard_stderr,
-                get_pty=False,
+                get_pty=get_pty,
             )
 
         logger.log(level=log_levels.MODULE_DEBUG, msg=f"Finished executing '{command}' ")

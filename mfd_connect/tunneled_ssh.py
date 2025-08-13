@@ -200,6 +200,7 @@ class TunneledSSHConnection(SSHConnection):
         expected_return_codes: Optional[Iterable] = frozenset({0}),
         shell: bool = False,
         custom_exception: Type[CalledProcessError] = None,
+        get_pty: bool = False,
     ) -> "ConnectionCompletedProcess":
         """
         Run program and wait for it's completion.
@@ -217,6 +218,7 @@ class TunneledSSHConnection(SSHConnection):
                                       If None - any return code is considered acceptable
         :param shell: Start process in a shell. Allows usage of shell constructions like pipes etc.
         :param custom_exception: Enable us to raise our exception if program exits with an unexpected return code.
+        :param get_pty: Request a pseudo-terminal from the server.
         custom_exception must inherit from CalledProcessError to use its fields like returncode, cmd, output, stderr
 
         :return: ConnectionCompletedProcess object
@@ -238,6 +240,7 @@ class TunneledSSHConnection(SSHConnection):
             expected_return_codes=expected_return_codes,
             shell=shell,
             custom_exception=custom_exception,
+            get_pty=get_pty,
         )
 
     def start_process(
