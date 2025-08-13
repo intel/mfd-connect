@@ -373,6 +373,12 @@ class TestSSHConnection:
         ssh.execute_command("cmd arg1 arg2", skip_logging=False)
         assert len([msg for msg in caplog.messages if "someoutput" in msg]) == 2  # stdout + stderr log
 
+    def test_execute_command_get_pty_warning(self, ssh, mocker, caplog):
+        caplog.set_level(0)
+        ssh._exec_command = mocker.Mock(return_value=(None, None, None, 0))
+        ssh.execute_command("cmd arg1 arg2", get_pty=True)
+        assert next(("pseudo-terminal" in msg for msg in caplog.messages), None) is not None
+
     def test_connect_additional_auth(self, ssh, mocker, caplog):
         caplog.set_level(logging.DEBUG)
         ssh._connection = mocker.create_autospec(mfd_connect.ssh.SSHClient)
