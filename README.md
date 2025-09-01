@@ -1101,6 +1101,32 @@ if code cannot establish connection, it will retry using deploy port (+1 for def
 
 If code cannot establish connection, it will start deployment of python using [Deployment setup tool](#deployment-setup-tool) and establish connection again.
 
+## RShell connection
+
+`RShellConnection` is a connection type that leverages `httplib.client` library to establish and manage connections using RESTful API over HTTP protocol in EFI Shell environment. `rshell_client.py` must be present on the EFI Shell target system.
+
+`rshell_server.py` is a server script that needs to be executed on the host machine to facilitate communication between the host and the EFI Shell target system. Server works on queue with address ip -> command to execute, it provides a RESTful API that allows the host to send commands and receive responses from the EFI Shell:
+
+  * `/execute_command` - Endpoint to execute commands on the EFI Shell target system:
+  Form fields:
+    * `timeout` - Timeout for command execution.
+    * `command` - Command to be executed.
+    * `ip` - IP address of the EFI Shell target system.
+  * `/post_result` - Endpoint to post results back to the host.
+    Headers fields:
+    * `CommandID` - Unique identifier for the command.
+    * `rc` - Return code of the executed command.
+    Body:
+    * Command output.
+  * `/exception` - Endpoint to handle exceptions that may occur during communication.
+    Headers fields:
+    * `CommandID` - Unique identifier for the command.
+    Body:
+    * Exception details.
+  * `/getCommandToExecute` - Endpoint to retrieve commands to be executed on the EFI Shell target system. Returns commandline with generated CommandID.
+  * `/health/<ip>` - Endpoint to check the health status of the connection.
+
+`rshell.py` is a Connection class that calls RESTful API endpoints provided by `rshell_server.py` to execute commands on the EFI Shell target system. If required, starts `rshell_server.py` on the host machine.
 
 ## OS supported:
 * LNX
