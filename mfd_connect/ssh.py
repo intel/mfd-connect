@@ -564,7 +564,7 @@ class SSHConnection(AsyncConnection):
             logger.log(
                 level=log_levels.MFD_INFO,
                 msg="[Warning] A pseudo-terminal was requested, "
-                    "but please be aware that this is not recommended and may lead to unexpected behavior.",
+                "but please be aware that this is not recommended and may lead to unexpected behavior.",
             )
 
         self._verify_command_correctness(command)
@@ -906,9 +906,14 @@ class SSHConnection(AsyncConnection):
         :param command: command to adjust
         :return: command
         """
-        if self.__use_sudo:
-            return f'sudo sh -c "{command}"' if "echo" in command else f"sudo {command}"
-        return command
+        if not self.__use_sudo:
+            return command
+
+        if "echo" in command:
+            _command = command.replace('"', '\\"')
+            return f'sudo sh -c "{_command}"'
+
+        return f"sudo {command}"
 
     def start_process_by_start_tool(
         self,
