@@ -308,14 +308,14 @@ class TestCustomPosixPath:
         text_to_write = "some text\nsome data"
         assert custom_posix_path.write_text(text_to_write) == 19
         custom_posix_path._owner.execute_command.assert_called_once_with(
-            'echo -e "some text\nsome data" > a', shell=True
+            "echo -e 'some text\nsome data' > a", shell=True
         )
 
     def test_write_text_encoding(self, custom_posix_path):
         text_to_write = "some text\nsome data"
         assert custom_posix_path.write_text(text_to_write, encoding="UTF-8") == 19
         custom_posix_path._owner.execute_command.assert_called_once_with(
-            'echo -e "some text\nsome data" | iconv --to-code=UTF-8 > a', shell=True
+            "echo -e 'some text\nsome data' | iconv --to-code=UTF-8 > a", shell=True
         )
 
     def test_new_object_contains_correct_connection_after_with_suffix(self, custom_posix_path):
