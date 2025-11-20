@@ -148,6 +148,22 @@ class CustomPath(PurePath):
                 if not name or f.sep in name or (f.altsep and f.altsep in name) or name == ".":
                     raise ValueError("Invalid name %r" % (name))
                 return self._from_parsed_parts_py3_12(self.drive, self.root, self._tail[:-1] + [name])
+    else:
+        def __truediv__(self, key):
+            try:
+                child = self._make_child((key,))
+                child._owner = self._owner
+                return child
+            except TypeError:
+                return NotImplemented
+
+        def __rtruediv__(self, key):
+            try:
+                child = self._from_parts([key] + self._parts)
+                child._owner = self._owner
+                return child
+            except TypeError:
+                return NotImplemented
 
     @property
     def parent(self) -> "CustomPath":  # pragma: no cover
@@ -384,7 +400,11 @@ class CustomPosixPath(CustomPath, PurePosixPath):
         )
 
     def read_text(self, encoding: Optional[str] = None, errors: Optional["Iterable"] = None) -> str:  # noqa:D102
-        return self._owner.execute_command(f"cat {self}", expected_return_codes=None).stdout
+        logger.log(level=log_levels.MODULE_DEBUG, msg="abaczek: version with logging skipped")
+        proc = self._owner.start_process(f"cat {self}")
+        return "".join(chunk for chunk in proc.get_stdout_iter())
+
+        # return self._owner.execute_command(f"cat {self}", expected_return_codes=None, skip_logging=True).stdout
 
     def touch(self, mode: int = 0o666, exist_ok: bool = True) -> None:  # noqa:D102
         if not exist_ok and self.is_file():
