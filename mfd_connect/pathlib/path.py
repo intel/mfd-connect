@@ -148,6 +148,22 @@ class CustomPath(PurePath):
                 if not name or f.sep in name or (f.altsep and f.altsep in name) or name == ".":
                     raise ValueError("Invalid name %r" % (name))
                 return self._from_parsed_parts_py3_12(self.drive, self.root, self._tail[:-1] + [name])
+    else:
+        def __truediv__(self, key):
+            try:
+                child = super().__truediv__(key)
+                child._owner = self._owner
+                return child
+            except TypeError:
+                return NotImplemented
+
+        def __rtruediv__(self, key):
+            try:
+                child = super().__rtruediv__(key)
+                child._owner = self._owner
+                return child
+            except TypeError:
+                return NotImplemented
 
     @property
     def parent(self) -> "CustomPath":  # pragma: no cover
