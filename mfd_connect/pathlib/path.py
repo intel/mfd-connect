@@ -400,7 +400,8 @@ class CustomPosixPath(CustomPath, PurePosixPath):
         )
 
     def read_text(self, encoding: Optional[str] = None, errors: Optional["Iterable"] = None) -> str:  # noqa:D102
-        return self._owner.execute_command(f"cat {self}", expected_return_codes=None).stdout
+        proc = self._owner.start_process(f"cat {self}")
+        return "".join(chunk for chunk in proc.get_stdout_iter())
 
     def touch(self, mode: int = 0o666, exist_ok: bool = True) -> None:  # noqa:D102
         if not exist_ok and self.is_file():

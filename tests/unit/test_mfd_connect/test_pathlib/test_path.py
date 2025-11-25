@@ -296,12 +296,13 @@ class TestCustomPosixPath:
             "diff a c", expected_return_codes=None, discard_stdout=True
         )
 
-    def test_read_text(self, custom_posix_path):
-        custom_posix_path._owner.execute_command.return_value = ConnectionCompletedProcess(
-            return_code=0, args="command", stdout="content of file", stderr="stderr"
-        )
-        assert custom_posix_path.read_text() == "content of file"
-        custom_posix_path._owner.execute_command.assert_called_once_with("cat a", expected_return_codes=None)
+    def test_read_text(self, custom_posix_path, mocker):
+        mock_process = mocker.MagicMock()
+        mock_process.get_stdout_iter.return_value = iter(["content ", "of ", "file"])
+        custom_posix_path._owner.start_process.return_value = mock_process
+        result = custom_posix_path.read_text()
+        assert result == "content of file"
+        custom_posix_path._owner.start_process.assert_called_once_with("cat a")
 
     def test_write_text(self, custom_posix_path):
         text_to_write = "some text\nsome data"
