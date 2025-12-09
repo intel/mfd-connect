@@ -1,0 +1,21 @@
+name: Run Tests (ut + ft)
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  push:
+    branches:
+      - main
+
+jobs:
+  run_tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python_version: ['3.10', '3.13']
+    uses: intel/mfd/.github/workflows/run_tests.yml@main   
+    with:      
+      PYTHON_VERSION: ${{ matrix.python_version }}
+      RUNS_ON: ${{ matrix.os }}
+      PROJECT_NAME: 'mfd-connect'
