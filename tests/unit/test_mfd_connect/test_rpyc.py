@@ -463,6 +463,7 @@ class TestRPyCConnection:
     )
     def test_start_process_log_file(self, rpyc, mocker, os_type, command, expected_split_command):
         rpyc._os_type = os_type
+        rpyc.get_os_name = mocker.Mock(return_value=OSName.LINUX)
         rpyc.modules = mocker.Mock()
         rpyc._resolve_process_output_arguments = mocker.create_autospec(
             rpyc._resolve_process_output_arguments, return_value=("", "")
