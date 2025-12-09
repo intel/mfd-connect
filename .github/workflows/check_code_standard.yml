@@ -1,20 +1,17 @@
-name: Dev Build
+name: Check Code Standard
 
 on:
   pull_request:
     types: [opened, synchronize]
 
 jobs:
-  build_whl:
+  run_check_standard:
     strategy:
       fail-fast: false
       matrix:
         python_version: ['3.10', '3.13']
-    uses: intel/mfd/.github/workflows/pull_request.yml@main
-    secrets:
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+    uses: intel/mfd/.github/workflows/check_code_standard.yml@main  
     with:
       REPOSITORY_NAME: ${{ github.event.pull_request.head.repo.full_name }}
       BRANCH_NAME: ${{ github.head_ref }}
       PYTHON_VERSION: ${{ matrix.python_version }}
-      PROJECT_NAME: 'mfd-connect'

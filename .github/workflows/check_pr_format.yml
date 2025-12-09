@@ -1,0 +1,12 @@
+name: Title + Commit Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  validate_pr_format:
+    uses: intel/mfd/.github/workflows/check_pr_format.yml@main
+    with:
+      REPOSITORY_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+      BRANCH_NAME: ${{ github.head_ref }}

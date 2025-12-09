@@ -1,0 +1,9 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  dependency_review:
+    uses: intel/mfd/.github/workflows/dependency_review.yml@main

@@ -1,23 +1,19 @@
-name: CI BUILD - RELEASE MODE
+name: CI Build - Release Mode
+
 on:
   workflow_dispatch:
 
 jobs:
   build_upload_whl:
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - name: python-version-3-10
-            python_version: '3.10'
-            push_tag: false
-            upload_package: false
-            continue-on-error: true
-          - name: python-version-3-13
-            python_version: '3.13'
-            push_tag: true
-            upload_package: true
-            continue-on-error: true
-    uses: ./.github/workflows/build_upload_whl.yml
+        - python_version: '3.10'
+          release_steps: true
+        - python_version: '3.13'
+          release_steps: false
+    uses: intel/mfd/.github/workflows/manual_release.yml@main
     secrets:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
@@ -25,9 +21,5 @@ jobs:
       REPOSITORY_NAME: ${{ github.repository }}
       BRANCH_NAME: ${{ github.ref_name }}
       PYTHON_VERSION: ${{ matrix.python_version }}
-      PUSH_TAG: ${{ matrix.push_tag }}
-      RELEASE_BUILD: true
-      UPLOAD_PACKAGE: ${{ matrix.upload_package }}
-      GIT_USER: 'mfd-intel-bot'
-      GIT_EMAIL: 'mfd_intel_bot@intel.com'
       PROJECT_NAME: 'mfd-connect'
+      RELEASE_STEPS: ${{ matrix.release_steps }}
