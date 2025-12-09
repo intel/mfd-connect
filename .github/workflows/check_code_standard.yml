@@ -10,7 +10,7 @@ jobs:
       fail-fast: false
       matrix:
         python_version: ['3.10', '3.13']
-    uses: intel/mfd/.github/workflows/check_code_standard.yml@main  
+    uses: intel/mfd/.github/workflows/check_code_standard.yml@main
     with:
       REPOSITORY_NAME: ${{ github.event.pull_request.head.repo.full_name }}
       BRANCH_NAME: ${{ github.head_ref }}

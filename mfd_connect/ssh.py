@@ -562,7 +562,7 @@ class SSHConnection(AsyncConnection):
             logger.log(
                 level=log_levels.MFD_INFO,
                 msg="[Warning] A pseudo-terminal was requested, "
-                    "but please be aware that this is not recommended and may lead to unexpected behavior.",
+                "but please be aware that this is not recommended and may lead to unexpected behavior.",
             )
 
         self._verify_command_correctness(command)
