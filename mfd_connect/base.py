@@ -600,7 +600,15 @@ class AsyncConnection(Connection, ABC):
             log_path.touch()
         elif log_file is True:
             log_filename = f"{hashlib.shake_256((command+str(random.getrandbits(128))).encode()).hexdigest(6)}.log"
-            logs_directory = self.path("~", "execution_logs").expanduser()
+            logs_directory = None
+            if self.get_os_name() == OSName.ESXI:
+                datastore_pattern = "/vmfs/volumes/datastore*"
+                datastore_paths = self.modules().glob.glob(datastore_pattern)
+                if datastore_paths:
+                    # Take the first datastore found
+                    logs_directory = self.path(datastore_paths[0], "execution_logs").expanduser()
+            if not logs_directory:
+                logs_directory = self.path("~", "execution_logs").expanduser()
             log_path = logs_directory / log_filename
             if not logs_directory.exists():
                 logs_directory.mkdir(parents=True, exist_ok=True)
