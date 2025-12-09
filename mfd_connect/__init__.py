@@ -6,22 +6,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-import platform
+import platform  # noqa E402
 
-from mfd_typing import OSName
+from mfd_typing import OSName  # noqa E402
 
-from .base import Connection, AsyncConnection, PythonConnection
-from .local import LocalConnection
-from .rpyc import RPyCConnection
-from .tunneled_rpyc import TunneledRPyCConnection
-from .sol import SolConnection
-from .serial import SerialConnection
-from .telnet.telnet import TelnetConnection
+from .base import Connection, AsyncConnection, PythonConnection  # noqa E402
+from .local import LocalConnection  # noqa E402
+from .rpyc import RPyCConnection  # noqa E402
+from .tunneled_rpyc import TunneledRPyCConnection  # noqa E402
+from .sol import SolConnection  # noqa E402
+from .serial import SerialConnection  # noqa E402
+from .telnet.telnet import TelnetConnection  # noqa E402
 
 if platform.system() != OSName.ESXI.value:
-    from .winrm import WinRmConnection
-    from .ssh import SSHConnection
-    from .interactive_ssh import InteractiveSSHConnection
-    from .tunneled_ssh import TunneledSSHConnection
-    from .rpyc_zero_deploy import RPyCZeroDeployConnection
-    from .pxssh import PxsshConnection
+    from .winrm import WinRmConnection  # noqa E402
+    from .ssh import SSHConnection  # noqa E402
+    from .interactive_ssh import InteractiveSSHConnection  # noqa E402
+    from .tunneled_ssh import TunneledSSHConnection  # noqa E402
+    from .rpyc_zero_deploy import RPyCZeroDeployConnection  # noqa E402
+    from .pxssh import PxsshConnection  # noqa E402
