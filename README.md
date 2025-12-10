@@ -286,7 +286,7 @@ It's a Connection done by paramiko library.
 
 Constructor:
 
-`SSHConnection(ip: str, port: int = 22, username: str, password: Optional[str], key_path: Optional[Union[List[Union[str, "Path"]], str, "Path"]] = None, skip_key_verification: bool = False, model: "BaseModel | None" = None, default_timeout: int | None = None,)`
+`SSHConnection(ip: str, port: int = 22, username: str, password: Optional[str], key_path: Optional[Union[List[Union[str, "Path"]], str, "Path"]] = None, skip_key_verification: bool = False, model: "BaseModel | None" = None, default_timeout: int | None = None, with_privileges: bool = False)`
 ```python
 """
 Initialise SSHConnection.
@@ -300,6 +300,7 @@ Initialise SSHConnection.
 :param skip_key_verification: To skip checking of host's key, equivalent of StrictHostKeyChecking=no
 :param model: pydantic model of connection
 :param default_timeout: Set default_timeout property.
+:param with_privileges: Whether to use sudo or runas for commands that require elevated privileges
 """
 ```
 
