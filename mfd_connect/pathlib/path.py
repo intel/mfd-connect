@@ -149,7 +149,8 @@ class CustomPath(PurePath):
                     raise ValueError("Invalid name %r" % (name))
                 return self._from_parsed_parts_py3_12(self.drive, self.root, self._tail[:-1] + [name])
     else:
-        def __truediv__(self, key):
+
+        def __truediv__(self, key: str) -> "CustomPath":
             try:
                 child = super().__truediv__(key)
                 child._owner = self._owner
@@ -157,7 +158,7 @@ class CustomPath(PurePath):
             except TypeError:
                 return NotImplemented
 
-        def __rtruediv__(self, key):
+        def __rtruediv__(self, key: str) -> "CustomPath":
             try:
                 child = super().__rtruediv__(key)
                 child._owner = self._owner

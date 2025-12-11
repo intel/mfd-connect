@@ -150,6 +150,7 @@ class TestAsyncConnection:
 
     def test__prepare_log_file_log_file(self, conn, mocker):
         conn._os_type = OSType.POSIX
+        conn.get_os_name = mock.Mock(return_value=OSName.LINUX)
         command = "iperf3 -s -B 198.108.8.1 -p 5201 --format M"
         path_mock = mocker.patch("mfd_connect.RPyCConnection.path", return_value=mocker.create_autospec(Path))
         directory_mock = path_mock.return_value.expanduser.return_value = mocker.create_autospec(Path)
@@ -157,7 +158,7 @@ class TestAsyncConnection:
         assert conn._prepare_log_file(command, log_file=True, output_file=None)
         directory_mock.exists.assert_called_once()
         log_filename.touch.assert_called_once()
-        # check if next logfile from the same command has different sha
+        # check if next logfile from the same command has different SHA
         conn._prepare_log_file(command, log_file=True, output_file=None)
         assert len(directory_mock.__truediv__.call_args_list) == 2
         log_path_creation_calls = directory_mock.__truediv__.call_args_list
@@ -166,10 +167,69 @@ class TestAsyncConnection:
 
     def test__prepare_log_file_log_file_directory_not_exists(self, conn, mocker):
         conn._os_type = OSType.POSIX
+        conn.get_os_name = mock.Mock(return_value=OSName.LINUX)
         command = "iperf3 -s -B 198.108.8.1 -p 5201 --format M"
         path_mock = mocker.patch("mfd_connect.RPyCConnection.path", return_value=mocker.create_autospec(Path))
         directory_mock = path_mock.return_value.expanduser.return_value = mocker.create_autospec(Path)
         directory_mock.exists.return_value = False
+        log_filename = directory_mock.__truediv__.return_value = mocker.create_autospec(Path)
+        assert conn._prepare_log_file(command, log_file=True, output_file=None)
+        directory_mock.exists.assert_called_once()
+        directory_mock.mkdir.assert_called_once()
+        log_filename.touch.assert_called_once()
+
+    def test__prepare_log_file_log_file_esxi(self, conn, mocker):
+        conn._os_type = OSType.POSIX
+        conn.get_os_name = mock.Mock(return_value=OSName.ESXI)
+        command = "iperf3 -s -B 198.108.8.1 -p 5201 --format M"
+        path_mock = mocker.patch("mfd_connect.RPyCConnection.path", return_value=mocker.create_autospec(Path))
+        directory_mock = path_mock.return_value.expanduser.return_value = mocker.create_autospec(Path)
+        modules_mock = mocker.Mock()
+        glob_mock = mocker.Mock()
+        glob_mock.glob.return_value = ["vmfs/volumes/datastore12"]
+        modules_mock.glob = glob_mock
+        conn.modules = mocker.Mock(return_value=modules_mock)
+        log_filename = directory_mock.__truediv__.return_value = mocker.create_autospec(Path)
+        assert conn._prepare_log_file(command, log_file=True, output_file=None)
+        directory_mock.exists.assert_called_once()
+        log_filename.touch.assert_called_once()
+        # check if next logfile from the same command has different SHA
+        conn._prepare_log_file(command, log_file=True, output_file=None)
+        assert len(directory_mock.__truediv__.call_args_list) == 2
+        log_path_creation_calls = directory_mock.__truediv__.call_args_list
+        # check if path was created with different log_filename, path creation is done by truediv '/'
+        assert log_path_creation_calls[0] != log_path_creation_calls[1]
+
+    def test__prepare_log_file_log_file_directory_not_exists_esxi(self, conn, mocker):
+        conn._os_type = OSType.POSIX
+        conn.get_os_name = mock.Mock(return_value=OSName.ESXI)
+        command = "iperf3 -s -B 198.108.8.1 -p 5202 --format M"
+        path_mock = mocker.patch("mfd_connect.RPyCConnection.path", return_value=mocker.create_autospec(Path))
+        directory_mock = path_mock.return_value.expanduser.return_value = mocker.create_autospec(Path)
+        directory_mock.exists.return_value = False
+        modules_mock = mocker.Mock()
+        glob_mock = mocker.Mock()
+        glob_mock.glob.return_value = ["vmfs/volumes/datastore1"]
+        modules_mock.glob = glob_mock
+        conn.modules = mocker.Mock(return_value=modules_mock)
+        log_filename = directory_mock.__truediv__.return_value = mocker.create_autospec(Path)
+        assert conn._prepare_log_file(command, log_file=True, output_file=None)
+        directory_mock.exists.assert_called_once()
+        directory_mock.mkdir.assert_called_once()
+        log_filename.touch.assert_called_once()
+
+    def test__prepare_log_file_log_file_directory_and_datastore_not_exist_esxi(self, conn, mocker):
+        conn._os_type = OSType.POSIX
+        conn.get_os_name = mock.Mock(return_value=OSName.ESXI)
+        command = "iperf3 -s -B 198.108.8.1 -p 5201 --format M"
+        path_mock = mocker.patch("mfd_connect.RPyCConnection.path", return_value=mocker.create_autospec(Path))
+        directory_mock = path_mock.return_value.expanduser.return_value = mocker.create_autospec(Path)
+        directory_mock.exists.return_value = False
+        modules_mock = mocker.Mock()
+        glob_mock = mocker.Mock()
+        glob_mock.glob.return_value = []
+        modules_mock.glob = glob_mock
+        conn.modules = mocker.Mock(return_value=modules_mock)
         log_filename = directory_mock.__truediv__.return_value = mocker.create_autospec(Path)
         assert conn._prepare_log_file(command, log_file=True, output_file=None)
         directory_mock.exists.assert_called_once()
