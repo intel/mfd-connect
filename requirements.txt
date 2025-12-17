@@ -9,6 +9,6 @@ mfd-typing >= 1.23.0, < 2
 mfd-common-libs>=1.11.0
 psutil~=5.9.5; platform_system != 'VMkernel'
 mfd-ftp>=1.8.0
-pywinrm~=0.4.3
+pywinrm~=0.5.0
 netaddr
 telnetlib-313-and-up; python_version >= '3.13'
