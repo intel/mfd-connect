@@ -433,9 +433,9 @@ class CustomPosixPath(CustomPath, PurePosixPath):
         :returns: Number of characters written
         """
         if encoding:
-            command = f'echo -e "{data}" | iconv --to-code={encoding} > {self}'
+            command = f"echo -e '{data}' | iconv --to-code={encoding} > {self}"
         else:
-            command = f'echo -e "{data}" > {self}'
+            command = f"echo -e '{data}' > {self}"
         self._owner.execute_command(command, shell=True)
         return len(data)
 
