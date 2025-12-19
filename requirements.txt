@@ -12,3 +12,4 @@ mfd-ftp>=1.8.0
 pywinrm~=0.4.3
 netaddr
 telnetlib-313-and-up; python_version >= '3.13'
+flask
