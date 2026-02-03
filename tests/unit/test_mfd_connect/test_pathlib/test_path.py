@@ -714,10 +714,15 @@ class TestCustomEFIShellPath:
         custom_efishell_path._owner.execute_command.assert_called_once_with("cat a", expected_return_codes=None)
 
     def test_write_text(self, custom_efishell_path):
+        text_to_write = "some text"
+        assert custom_efishell_path.write_text(text_to_write) == 9
+        custom_efishell_path._owner.execute_command.assert_called_once_with('echo "some text" > a', shell=True)
+
+    def test_write_text_newline(self, custom_efishell_path, mocker):
         text_to_write = "some text\nsome data"
         assert custom_efishell_path.write_text(text_to_write) == 19
-        custom_efishell_path._owner.execute_command.assert_called_once_with(
-            'echo "some text\nsome data" > a', shell=True
+        custom_efishell_path._owner.execute_command.assert_has_calls(
+            [mocker.call('echo "some text" > a', shell=True), mocker.call('echo "some data" >> a', shell=True)]
         )
 
     def test_new_object_contains_correct_connection_after_with_suffix(self, custom_efishell_path):
