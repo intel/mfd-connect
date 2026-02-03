@@ -602,17 +602,25 @@ class CustomEFIShellPath(CustomWindowsPath):
         r"""
         Write text to file using echo.
 
-        Doesn't interpret special characters eg. \n
-
         :param data: Text to write
         :param encoding: Not used
         :param errors: Not used
         :param newline: Not used
         :returns: Number of characters written
         """
-        command = f'echo "{data}" > {self}'
-        self._owner.execute_command(command, shell=True)
-        return len(data)
+        sent_data_len = len(data)
+        if "\n" in data:
+            data = data.splitlines()
+            for index, line in enumerate(data):
+                if index == 0:
+                    command = f'echo "{line}" > {self}'
+                else:
+                    command = f'echo "{line}" >> {self}'
+                self._owner.execute_command(command, shell=True)
+        else:
+            command = f'echo "{data}" > {self}'
+            self._owner.execute_command(command, shell=True)
+        return sent_data_len
 
     def unlink(self) -> None:
         """
