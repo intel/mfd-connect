@@ -1,8 +1,9 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: MIT
 """RShell Connection Class."""
 
 import logging
+from math import e
 import sys
 import time
 import typing
@@ -14,9 +15,11 @@ from mfd_common_libs import add_logging_level, log_levels, TimeoutCounter
 from mfd_typing.cpu_values import CPUArchitecture
 from mfd_typing.os_values import OSBitness, OSName, OSType
 
+from mfd_connect.exceptions import ConnectionCalledProcessError, OsNotSupported
 from mfd_connect.local import LocalConnection
 from mfd_connect.pathlib.path import CustomPath, custom_path_factory
 from mfd_connect.process.base import RemoteProcess
+from mfd_connect.util.decorators import conditional_cache
 
 from .base import Connection, ConnectionCompletedProcess
 
@@ -30,6 +33,11 @@ logger = logging.getLogger(__name__)
 add_logging_level(level_name="MODULE_DEBUG", level_value=log_levels.MODULE_DEBUG)
 add_logging_level(level_name="CMD", level_value=log_levels.CMD)
 add_logging_level(level_name="OUT", level_value=log_levels.OUT)
+
+
+# Time to wait for platform to transition to off state after reset command is issued;  
+# can be adjusted based on requirements and observed behavior of platforms. 
+PLATFORM_POWER_TRANSITION_DELAY_SECONDS = 10  
 
 
 class RShellConnection(Connection):
@@ -59,12 +67,20 @@ class RShellConnection(Connection):
             # start Rshell server
             self.server_process = self._run_server()
             time.sleep(5)
+        self.wait_for_connection(connection_timeout)
+
+    def wait_for_connection(self, connection_timeout: int) -> None:
+        """Wait for connection to RShell server to be established."""
         timeout = TimeoutCounter(connection_timeout)
         while not timeout:
             logger.log(level=log_levels.MODULE_DEBUG, msg="Checking RShell server health")
-            status_code = requests.get(
-                f"http://{self.server_ip}/health/{self._ip}", proxies={"no_proxy": "*"}
-            ).status_code
+            try:
+                status_code = requests.get(
+                    f"http://{self.server_ip}/health/{self._ip}", proxies={"no_proxy": "*"}
+                ).status_code
+            except requests.RequestException as e:
+                logger.log(level=log_levels.MODULE_DEBUG, msg=f"RShell server health check failed with error: {e}")
+                status_code = None
             if status_code == 200:
                 logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server is healthy")
                 break
@@ -72,7 +88,7 @@ class RShellConnection(Connection):
         else:
             raise TimeoutError("Connection of Client to RShell server timed out")
 
-    def disconnect(self, stop_client: bool = False) -> None:
+    def disconnect(self, stop_client: bool = False, stop_server: bool = False) -> None:
         """
         Disconnect connection.
 
@@ -80,14 +96,12 @@ class RShellConnection(Connection):
 
         :param stop_client: Whether to stop the RShell client (default: False).
         """
+        requests.post(f"http://{self.server_ip}/disconnect_client/{self._ip}", proxies={"no_proxy": "*"})
         if stop_client:
             logger.log(level=log_levels.MODULE_DEBUG, msg="Stopping RShell client")
             self.execute_command("end")
-        if self.server_process:
-            logger.log(level=log_levels.MODULE_DEBUG, msg="Stopping RShell server")
-            self.server_process.kill()
-            logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server stopped")
-            logger.log(level=log_levels.MODULE_DEBUG, msg=self.server_process.stdout_text)
+        if stop_server and self.server_process:
+            self.stop_server()
 
     def _run_server(self) -> RemoteProcess:
         """Run RShell server locally."""
@@ -211,23 +225,98 @@ class RShellConnection(Connection):
 
         return CustomPath(*args, owner=self, **kwargs)
 
-    def get_os_name(self) -> OSName:  # noqa: D102
-        raise NotImplementedError
+    def _check_if_unix(self) -> bool:
+        """Check if Unix is the client OS."""
+        unix_check_command = "uname -a"
+        try:
+            result = self.execute_command(unix_check_command, expected_return_codes=[0, 127])
+            return not result.return_code
+        except ConnectionCalledProcessError:
+            return False
 
-    def get_os_type(self) -> OSType:  # noqa: D102
-        raise NotImplementedError
+    def _get_unix_distribution(self) -> OSName:
+        """Check distribution of connected Unix OS."""
+        unix_check_command = "uname -o"
+        result = self.execute_command(unix_check_command, expected_return_codes=[0, 127])
+        for os in OSName:
+            if os.value in result.stdout:
+                return os
+        raise OsNotSupported("Client OS not supported")
 
-    def get_os_bitness(self) -> OSBitness:  # noqa: D102
-        raise NotImplementedError
+    def _check_if_efi_shell(self) -> bool:
+        """Check if EFI shell is the client OS."""
+        efi_shell_check_command = "ver"
+        output = self.execute_command(
+            efi_shell_check_command, shell=False, expected_return_codes=None, timeout=5
+        ).stdout
+        return any(out in output for out in ["UEFI Shell", "UEFI Interactive Shell"])
 
-    def get_cpu_architecture(self) -> CPUArchitecture:  # noqa: D102
-        raise NotImplementedError
+    @conditional_cache
+    def get_os_type(self) -> OSType:
+        """Get type of client OS."""
+        if self._check_if_efi_shell():
+            return OSType.EFISHELL
 
-    def restart_platform(self) -> None:  # noqa: D102
-        raise NotImplementedError
+        if self._check_if_unix():
+            return OSType.POSIX
 
-    def shutdown_platform(self) -> None:  # noqa: D102
-        raise NotImplementedError
+        raise OsNotSupported("Client OS not supported")
 
-    def wait_for_host(self, timeout: int = 60) -> None:  # noqa: D102
-        raise NotImplementedError
+    @conditional_cache
+    def get_os_name(self) -> OSName:
+        """Get name of client OS."""
+        if self._check_if_efi_shell():
+            return OSName.EFISHELL
+
+        if self._check_if_unix():
+            return self._get_unix_distribution()
+
+        raise OsNotSupported("Client OS not supported")
+
+    @conditional_cache
+    def get_os_bitness(self) -> OSBitness:
+        """Get bitness of client os."""
+        if self._check_if_efi_shell():
+            return OSBitness.OS_64BIT  # current requirements describe only EFISHELL as required
+        raise OsNotSupported("Client OS is not supported")
+
+    @conditional_cache
+    def get_cpu_architecture(self) -> CPUArchitecture:
+        """Get CPU architecture."""
+        if self._check_if_efi_shell():
+            return CPUArchitecture.X86_64
+        raise OsNotSupported("'get_cpu_architecture' not supported on that OS")
+
+    def restart_platform(self) -> None:
+        """Restart the platform."""
+        self.execute_command("reset -c")
+        time.sleep(PLATFORM_POWER_TRANSITION_DELAY_SECONDS)
+        self.disconnect()
+
+    def warm_reboot_platform(self) -> None:
+        """Warm reboot the platform."""
+        self.execute_command("reset -w")
+        time.sleep(PLATFORM_POWER_TRANSITION_DELAY_SECONDS)
+        self.disconnect()
+
+    def shutdown_platform(self) -> None:
+        """Shutdown the platform."""
+        self.execute_command("reset -s")
+        time.sleep(PLATFORM_POWER_TRANSITION_DELAY_SECONDS)
+        self.disconnect()
+
+    def wait_for_host(self, timeout: int = 60) -> None:
+        """
+        Wait for the host to be reachable.
+
+        :param timeout: Timeout in seconds.
+        """
+        self.wait_for_connection(timeout)
+
+    def stop_server(self) -> None:
+        """Stop the RShell server."""
+        if self.server_process:
+            logger.log(level=log_levels.MODULE_DEBUG, msg="Stopping RShell server")
+            self.server_process.kill()
+            logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server stopped")
+            logger.log(level=log_levels.MODULE_DEBUG, msg=self.server_process.stdout_text)
