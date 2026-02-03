@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from flask import Flask, Response, request
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # Global command queue
 output_object = namedtuple("OutputObject", ["output", "rc"])
@@ -131,6 +131,8 @@ def execute_command() -> Response:
         _id = add_command_to_queue(command, ip_address)
         if command == "end":
             return Response("No more commands available to run", status=200)
+        if command.startswith("reset"):
+            return Response("Reset command sent", status=200)
         process = get_output(_id, timeout)
         return Response(
             process.output.encode("utf-8"),
@@ -143,6 +145,19 @@ def execute_command() -> Response:
         )
     else:
         return Response("No command provided", status=400)
+
+
+@app.route("/disconnect_client/<ip_address>", methods=["POST"])
+def disconnect_client(ip_address: str) -> Response:
+    """
+    Disconnect a client from the server.
+
+    :param ip_address: The IP address of the client to disconnect.
+    """
+    if ip_address in clients:
+        clients.remove(ip_address)
+        print(f"Client disconnected: {ip_address}")
+    return Response("Client disconnected", status=200)
 
 
 @app.route("/post_result", methods=["POST"])
