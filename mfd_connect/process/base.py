@@ -149,6 +149,8 @@ class RemoteProcess(ABC):
                      If None - no waiting is performed.
         :raises RemoteProcessInvalidState: when process cannot be found in system, or found problem during stop
         :raises ModuleNotFoundError: when psutil is not available for remote machine
+        :raises TimeoutExpired: when processes are still alive after stop command in case of wait is not None
+
         """
         assert wait is None or wait > 0, "'wait' parameter must be greater than zero"
 
@@ -162,6 +164,7 @@ class RemoteProcess(ABC):
         :param with_signal: Signal to be used for killing process, e.g. signal.SIGTERM
         :raises RemoteProcessInvalidState: when process cannot be found in system, or found problem during kill
         :raises ModuleNotFoundError: when psutil is not available for remote machine
+        :raises TimeoutExpired: when processes are still alive after kill command in case of wait is not None
         """
         assert wait is None or wait > 0, "'wait' parameter must be greater than zero"
 

@@ -280,22 +280,37 @@ class RPyCProcess(RemoteProcess):
         with suppress(RemoteProcessStreamNotAvailable):
             _ = self._stderr_queue  # noqa F841
 
-    def _get_and_kill_process(self, with_signal: Optional[typing.Union[Signals, str, int]] = None) -> None:
+    def _get_and_kill_process(self, with_signal: Optional[typing.Union[Signals, str, int]] = None, wait_timeout: int | None = 5) -> None:
         """
         Kill process and all of its children processes.
 
         :param with_signal: Signal used for killing processes - be aware it must be signal from remote connection
         :raises ModuleNotFoundError: when psutil is not available
+        :raises RemoteProcessInvalidState: when processes are still alive after kill command in case of wait_timeout is not None
         """
         psutil_process = self._get_psutil_process()
         children = self._get_children_processes(process=psutil_process)
         for child in children:
             self._kill_process(child, with_signal, is_child=True)
 
-        gone, still_alive = self._owner.modules().psutil.wait_procs(children, timeout=5)
+        try:
+            gone, still_alive = self._owner.modules().psutil.wait_procs(children, timeout=wait_timeout)
+        except self._owner.modules().psutil.TimeoutExpired as e:
+            logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for children processes: {e}")
+            if wait_timeout is None:
+                gone, still_alive = [], children
+            else:                
+                raise RemoteProcessInvalidState("Found exception during waiting for children processes") from e
         logger.log(level=log_levels.MODULE_DEBUG, msg=f"gone: {gone}, still_alive: {still_alive}")
         self._kill_process(psutil_process, with_signal)
-        psutil_process.wait(5)
+        try:
+            psutil_process.wait(timeout=wait_timeout)
+        except self._owner.modules().psutil.TimeoutExpired as e:
+            logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for main process: {e}")
+            if wait_timeout is None:
+                return
+            else:
+                raise RemoteProcessInvalidState("Found exception during waiting for main process") from e
 
     def _get_children_processes(self, process: "Process") -> typing.List["Process"]:
         """
