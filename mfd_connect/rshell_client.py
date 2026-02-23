@@ -7,7 +7,7 @@ Make sure that the Python UEFI interpreter is compiled with
 Socket module support.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 try:
     import httplib as client
@@ -78,9 +78,19 @@ while True:
         exit(0)
 
     print("Executing", cmd_str)
+    if cmd_name.startswith("reset"):
+        print("Reset command received, shutting down the platform")
+        os.system(cmd_str)  # execute reset command on machine
+        conn.close()
+        exit(0)
 
-    out = cmd_name + ".txt"
-    cmd = cmd_str + " > " + out
+    non_echo = False
+    if cmd_name.startswith("echo"):
+        cmd = cmd_str
+    else:
+        non_echo = True
+        out = cmd_name + ".txt"
+        cmd = cmd_str + " > " + out
 
     time.sleep(5)
     rc = os.system(cmd)  # execute command on machine
@@ -95,16 +105,21 @@ while True:
         else:
             encoding = "utf-8"
 
-        f = open(out, "r", encoding=encoding)
+        output = ""
+        f = None
+        if non_echo:
+            f = open(out, "r", encoding=encoding)
+            output = f.read()
 
         conn.request(
             "POST",
             "post_result",
-            body=f.read(),
+            body=output,
             headers={"Content-Type": "text/plain", "Connection": "keep-alive", "CommandID": _id, "rc": rc},
         )
-        f.close()
-        os.system("del " + out)
+        if non_echo and f:
+            f.close()
+            os.system("del " + out)
     except Exception as exp:
         conn.request(
             "POST",
