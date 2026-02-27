@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: MIT
 """Package for Connection implementations."""
 
@@ -21,6 +21,7 @@ from .telnet.telnet import TelnetConnection  # noqa E402
 if platform.system() != OSName.ESXI.value:
     from .winrm import WinRmConnection  # noqa E402
     from .ssh import SSHConnection  # noqa E402
+    from .ssh_config import SSHConfigConnection  # noqa E402
     from .interactive_ssh import InteractiveSSHConnection  # noqa E402
     from .tunneled_ssh import TunneledSSHConnection  # noqa E402
     from .rpyc_zero_deploy import RPyCZeroDeployConnection  # noqa E402
