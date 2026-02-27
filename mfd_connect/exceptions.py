@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: MIT
 """Module for all the Connection exceptions."""
 
@@ -147,6 +147,10 @@ class PxsshException(ModuleFrameworkDesignError):
 
 class InteractiveSSHException(ModuleFrameworkDesignError):
     """Handling exceptions in InteractiveSSHConnection class."""
+
+
+class SSHConfigException(ModuleFrameworkDesignError):
+    """Handling exceptions in SSHConfigConnection class."""
 
 
 class CopyException(ModuleFrameworkDesignError):
