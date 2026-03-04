@@ -54,6 +54,8 @@ classDiagram
     }
     class TunneledSSHConnection{
     }
+    class SSHConfigConnection{
+    }
     class RPyCConnection{
     }
     class TunneledRPyCConnection{
@@ -93,6 +95,7 @@ classDiagram
     RPyCConnection <|-- RPyCZeroDeployConnection
     AsyncConnection <|-- SSHConnection
     SSHConnection <|-- TunneledSSHConnection
+    SSHConnection <|-- SSHConfigConnection
     AsyncConnection <|-- PxsshConnection
 ```
 
@@ -101,7 +104,7 @@ classDiagram
 
 > :warning: On ESXi module must be deployed on remote side in case of `PythonConnection`.
 
-> :warning: On ESXi as a test controller `SSHConnection`, `TunneledSSHConnection` and `RPyCZeroDeployConnection` are not supported.
+> :warning: On ESXi as a test controller `SSHConnection`, `TunneledSSHConnection`, `SSHConfigConnection` and `RPyCZeroDeployConnection` are not supported.
 
 
 ## Connection types and method availability
@@ -845,6 +848,27 @@ If you want to connect to target `192.168.0.1` (credentials `user`:`***`) using 
 
 > Note: To establish proper connection `local_bind_port` must be unique for each `TunneledSSHConnection` object.
 > The code is written the way it will look for the first available and unique free port so the user does not have to worry to provide unique port.
+
+### SSHConfigConnection
+Allows to create an SSH connection using Host mnemonics from `~/.ssh/config`. Resolves hostname, user, port,
+identity file, StrictHostKeyChecking and ProxyJump chains automatically.
+
+For ProxyJump hosts, it builds a paramiko transport chain through the intermediate jump hosts.
+Supports arbitrary hop depth and devices that accept unauthenticated (`auth_none`) connections.
+
+```python
+# Direct host
+conn = SSHConfigConnection(host="b1.a.host")
+
+# ProxyJump host (resolved automatically from config)
+conn = SSHConfigConnection(host="imc")
+
+# With password override
+conn = SSHConfigConnection(host="sut", password="my_password")
+
+# Custom config path
+conn = SSHConfigConnection(host="my-host", config_path="/path/to/config")
+```
 
 ### TelnetConnection
 TelnetConnection was created mainly with the purpose of enabling SerialConnection to work (using port redirection for telnet).
