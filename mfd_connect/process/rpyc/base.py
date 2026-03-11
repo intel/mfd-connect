@@ -295,20 +295,24 @@ class RPyCProcess(RemoteProcess):
 
         try:
             gone, still_alive = self._owner.modules().psutil.wait_procs(children, timeout=wait_timeout)
-        except self._owner.modules().psutil.TimeoutExpired as e:
-            logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for children processes: {e}")
-            if wait_timeout is None:
-                gone, still_alive = [], children
+            logger.log(level=log_levels.MODULE_DEBUG, msg=f"gone: {gone}, still_alive: {still_alive}")
+        except Exception as e:
+            if "result expired" in str(e):
+                logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for children processes: {e}")
+                if wait_timeout is not None:           
+                    raise RemoteProcessInvalidState("Found exception during waiting for children processes") from e
             else:                
                 raise RemoteProcessInvalidState("Found exception during waiting for children processes") from e
-        logger.log(level=log_levels.MODULE_DEBUG, msg=f"gone: {gone}, still_alive: {still_alive}")
         self._kill_process(psutil_process, with_signal)
         try:
             psutil_process.wait(timeout=wait_timeout)
-        except self._owner.modules().psutil.TimeoutExpired as e:
-            logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for main process: {e}")
-            if wait_timeout is None:
-                return
+        except Exception as e:
+            if "result expired" in str(e):
+                logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for main process: {e}")
+                if wait_timeout is None:
+                    return
+                else:
+                    raise RemoteProcessInvalidState("Found exception during waiting for main process") from e
             else:
                 raise RemoteProcessInvalidState("Found exception during waiting for main process") from e
 
@@ -354,15 +358,7 @@ class RPyCProcess(RemoteProcess):
         try:
             if with_signal:
                 with_signal = self._convert_to_signal_object(with_signal)
-                logger.log(
-                    level=log_levels.MODULE_DEBUG,
-                    msg=f"Sending signal '{with_signal.name}' to {process_string} {process.pid}",
-                )
                 process.send_signal(with_signal)
-                logger.log(
-                    level=log_levels.MODULE_DEBUG,
-                    msg=f"Sent signal '{with_signal.name}' to {process_string} {process.pid}",
-                )
             else:
                 logger.log(level=log_levels.MODULE_DEBUG, msg=f"Killing {process_string} {process.pid}")
                 process.kill()
@@ -385,4 +381,4 @@ class RPyCProcess(RemoteProcess):
         elif isinstance(with_signal, Signals):
             return getattr(self._owner.modules().signal.Signals, with_signal.name)
         elif isinstance(with_signal, int):
-            return self._owner.modules().signal.Signals(with_signal)
+            return with_signal

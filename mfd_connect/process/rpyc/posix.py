@@ -27,7 +27,7 @@ class PosixRPyCProcess(RPyCProcess):
         """
         if self.running:
             super().stop()
-            self._get_and_kill_process(with_signal=SIGINT, wait_timeout=wait)
+            self._get_and_kill_process(with_signal=2, wait_timeout=wait)
 
             if wait is not None:
                 self.wait(timeout=wait)
