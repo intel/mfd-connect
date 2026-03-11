@@ -295,20 +295,24 @@ class RPyCProcess(RemoteProcess):
 
         try:
             gone, still_alive = self._owner.modules().psutil.wait_procs(children, timeout=wait_timeout)
-        except self._owner.modules().psutil.TimeoutExpired as e:
-            logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for children processes: {e}")
-            if wait_timeout is None:
-                gone, still_alive = [], children
+            logger.log(level=log_levels.MODULE_DEBUG, msg=f"gone: {gone}, still_alive: {still_alive}")
+        except Exception as e:
+            if "result expired" in str(e):
+                logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for children processes: {e}")
+                if wait_timeout is not None:           
+                    raise RemoteProcessInvalidState("Found exception during waiting for children processes") from e
             else:                
                 raise RemoteProcessInvalidState("Found exception during waiting for children processes") from e
-        logger.log(level=log_levels.MODULE_DEBUG, msg=f"gone: {gone}, still_alive: {still_alive}")
         self._kill_process(psutil_process, with_signal)
         try:
             psutil_process.wait(timeout=wait_timeout)
-        except self._owner.modules().psutil.TimeoutExpired as e:
-            logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for main process: {e}")
-            if wait_timeout is None:
-                return
+        except Exception as e:
+            if "result expired" in str(e):
+                logger.log(level=log_levels.MODULE_DEBUG, msg=f"got exception during waiting for main process: {e}")
+                if wait_timeout is None:
+                    return
+                else:
+                    raise RemoteProcessInvalidState("Found exception during waiting for main process") from e
             else:
                 raise RemoteProcessInvalidState("Found exception during waiting for main process") from e
 
