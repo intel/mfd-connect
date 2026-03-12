@@ -46,9 +46,8 @@ class TestCustomPath:
         path = expected_class("a", owner=mock_conn)
         assert isinstance(path, expected_class)
 
-    def test_from_parsed_parts_py3_12_sets_attrs_and_returns(self, monkeypatch, custom_path_instance, mocker):
-        # Simulate Python >= 3.12
-        monkeypatch.setattr(sys, "version_info", (3, 13, 0))
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="requires python3.12 or higher")
+    def test_from_parsed_parts_sets_attrs_and_returns(self, monkeypatch, custom_path_instance, mocker):
         drv, root, tail = "C:", "\\", ("folder", "file.txt")
         formatted = "C:\\folder\\file.txt"
 
@@ -58,7 +57,7 @@ class TestCustomPath:
         # Patch custom_path_factory to return a mock path object
         path_mock = mocker.Mock()
         cpf = mocker.patch("mfd_connect.pathlib.path.custom_path_factory", return_value=path_mock)
-        result = CustomPath._from_parsed_parts_py3_12(custom_path_instance, drv, root, tail)
+        result = CustomPath._from_parsed_parts(custom_path_instance, drv, root, tail)
         cpf.assert_called_once_with(formatted, owner=custom_path_instance._owner)
         assert path_mock._drv == drv
         assert path_mock._root == root
@@ -91,10 +90,10 @@ class TestCustomPath:
         assert custom_path.parent is custom_path
 
     @pytest.mark.skipif(sys.version_info < (3, 12), reason="requires python3.12 or higher")
-    def test_parent_312_tail_not_empty_calls_from_parsed_parts_py3_12(self, mocker):
+    def test_parent_312_tail_not_empty_calls_from_parsed_parts(self, mocker):
         mock_conn = mocker.Mock()
         custom_path = CustomPosixPath("/home/user/dir", owner=mock_conn)
-        fpp = mocker.patch.object(CustomPath, "_from_parsed_parts_py3_12", return_value="parent_path")
+        fpp = mocker.patch.object(CustomPath, "_from_parsed_parts", return_value="parent_path")
         result = custom_path.parent
         fpp.assert_called_once_with("", "/", ["home", "user"])
         assert result == "parent_path"

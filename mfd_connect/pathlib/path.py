@@ -7,7 +7,7 @@ import re
 import sys
 import typing
 from pathlib import PurePath, PurePosixPath, PureWindowsPath
-from typing import Union, Optional
+from typing import Union, Optional, Sequence
 
 from mfd_common_libs import add_logging_level, log_levels
 from mfd_typing.os_values import OSType, OSName
@@ -140,14 +140,14 @@ class CustomPath(PurePath):
                 if not tail:
                     raise ValueError(f"{self!r} has an empty name")
                 tail[-1] = name
-                return self._from_parsed_parts_py3_12(self.drive, self.root, tail)
+                return self._from_parsed_parts(self.drive, self.root, tail)
             else:
                 if not self.name:
                     raise ValueError("%r has an empty name" % (self,))
                 f = self._flavour
                 if not name or f.sep in name or (f.altsep and f.altsep in name) or name == ".":
                     raise ValueError("Invalid name %r" % (name))
-                return self._from_parsed_parts_py3_12(self.drive, self.root, self._tail[:-1] + [name])
+                return self._from_parsed_parts(self.drive, self.root, self._tail[:-1] + [name])
     else:
 
         def __truediv__(self, key: str) -> "CustomPath":
@@ -186,7 +186,7 @@ class CustomPath(PurePath):
             tail = self._tail
             if not tail:
                 return self
-            return self._from_parsed_parts_py3_12(drv, root, tail[:-1])  # instance method called
+            return self._from_parsed_parts(drv, root, tail[:-1])  # instance method called
 
     if sys.version_info < (3, 12):
 
@@ -211,21 +211,22 @@ class CustomPath(PurePath):
             self._root = root
             self._parts = parts
             return self
+    else:  # pragma: no cover (tested on Python 3.12+)
 
-    def _from_parsed_parts_py3_12(self, drv: str, root: str, tail: str) -> "CustomPath":
-        """
-        Create a new path from parsed parts for Python 3.12 and later.
+        def _from_parsed_parts(self, drv: str, root: str, tail: Sequence[str]) -> "CustomPath":
+            """
+            Create a new path from parsed parts for Python 3.12 and later.
 
-        :param drv: Drive part of the path
-        :param root: Root part of the path
-        :param tail: Tail parts of the path
-        :return: CustomPath object
-        """
-        path = custom_path_factory(self._format_parsed_parts(drv, root, tail), owner=self._owner)
-        path._drv = drv
-        path._root = root
-        path._tail_cached = tail
-        return path
+            :param drv: Drive part of the path
+            :param root: Root part of the path
+            :param tail: Tail parts of the path
+            :return: CustomPath object
+            """
+            path = custom_path_factory(self._format_parsed_parts(drv, root, tail), owner=self._owner)
+            path._drv = drv
+            path._root = root
+            path._tail_cached = tail
+            return path
 
     def rmdir(self) -> None:
         """
