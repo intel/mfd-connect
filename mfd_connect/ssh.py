@@ -73,6 +73,7 @@ class SSHConnection(AsyncConnection):
         model: "BaseModel | None" = None,
         default_timeout: int | None = None,
         cache_system_data: bool = True,
+        with_privileges: bool = False,
         **kwargs,
     ) -> None:
         """
@@ -91,9 +92,10 @@ class SSHConnection(AsyncConnection):
         :param model: pydantic model of connection
         :param default_timeout: Timeout value for executing timeout for entire class.
         :param cache_system_data: Flag to cache system data like self._os_type, OS name, OS bitness and CPU architecture
+        :param with_privileges: Whether to use sudo or runas for commands that require elevated privileges
         """
         super().__init__(ip, model, default_timeout, cache_system_data)
-        self.__use_sudo = False
+        self.__use_sudo = with_privileges
         self._ip = IPAddress(ip)
         self._connection = SSHClient()
         self._connection_details = {
@@ -904,9 +906,14 @@ class SSHConnection(AsyncConnection):
         :param command: command to adjust
         :return: command
         """
-        if self.__use_sudo:
-            return f'sudo sh -c "{command}"' if "echo" in command else f"sudo {command}"
-        return command
+        if not self.__use_sudo:
+            return command
+
+        if "echo" in command:
+            _command = command.replace('"', '\\"')
+            return f'sudo sh -c "{_command}"'
+
+        return f"sudo {command}"
 
     def start_process_by_start_tool(
         self,
