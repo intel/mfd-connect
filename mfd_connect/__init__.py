@@ -26,3 +26,4 @@ if platform.system() != OSName.ESXI.value:
     from .tunneled_ssh import TunneledSSHConnection  # noqa E402
     from .rpyc_zero_deploy import RPyCZeroDeployConnection  # noqa E402
     from .pxssh import PxsshConnection  # noqa E402
+    from .rshell import RShellConnection  # noqa E402
