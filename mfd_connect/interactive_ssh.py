@@ -805,3 +805,73 @@ class InteractiveSSHConnection(AsyncConnection):
             stdout = re.sub(rf"({re.escape(self.prompt)}\s*(\n|\r\n|\r)*)", "", stdout)
         stdout = re.sub(NEW_LINE_PATTERN, "\n", stdout)
         return stdout
+
+    def interactive_custom_command(
+        self,
+        additional_parameters: str,
+        cwd: str | None = None,
+        env: dict | None = None,
+        press_enter: bool = True,
+        confirm: str | None = None,
+    ) -> "ConnectionCompletedProcess":
+        """
+        Execute an interactive command that requires user prompts.
+
+        Handles two interactive patterns EEUpdate uses:
+        - "Press <Enter> to continue..." — responded to when press_enter=True
+        - "Continue (Y or N)?" — responded to with the confirm character when confirm is set
+
+        :param additional_parameters: Full command string to execute interactively
+        :param cwd: Current working directory for command execution
+        :param env: Environment variables for command execution
+        :param press_enter: Whether to automatically respond to "Press <Enter> to continue..." prompts
+        :param confirm: Character to send in response to a Y/N prompt (e.g. "y" or "n")
+        :return: ConnectionCompletedProcess with return_code and raw_output attributes
+        :raises TimeoutExpired: if the command does not finish within the timeout
+        """
+        if cwd is not None:
+            self._start_process(f"cd {cwd}", environment=env)
+            self.refresh_prompt()
+
+        self._start_process(additional_parameters, environment=env)
+        time.sleep(2)
+
+        raw_output = ""
+        _timeout_value = self.default_timeout or IO_TIMEOUT
+        _timeout_counter = TimeoutCounter(_timeout_value)
+
+        while not _timeout_counter:
+            chan = self.read_channel()
+            raw_output += chan
+
+            if self.prompt in chan:
+                break
+
+            if press_enter and re.search(r"Press\s+<Enter>\s+to\s+continue", chan, re.IGNORECASE):
+                logger.log(level=log_levels.MODULE_DEBUG, msg="Responding to 'Press <Enter> to continue' prompt")
+                self.write_to_channel("", with_enter=True)
+
+            if confirm is not None and re.search(r"Y\s+or\s+N", chan, re.IGNORECASE):
+                logger.log(level=log_levels.MODULE_DEBUG, msg=f"Responding to Y/N prompt with '{confirm}'")
+                self.write_to_channel(confirm, with_enter=True)
+                confirm = None  # send only once
+
+            time.sleep(1)
+        else:
+            raise TimeoutExpired(
+                f"Interactive command '{additional_parameters}' did not finish in {_timeout_value} seconds",
+                _timeout_value,
+            )
+
+        return_code = self._get_return_code(output=raw_output)
+
+        result = ConnectionCompletedProcess(
+            args=additional_parameters,
+            stdout=raw_output,
+            stderr="",
+            stdout_bytes=b"",
+            stderr_bytes=b"",
+            return_code=return_code,
+        )
+        result.raw_output = raw_output
+        return result
