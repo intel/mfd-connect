@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## Unreleased
+
+### Features
+
+- Add `interactive_custom_command` to `InteractiveSSHConnection` and `Connection` base class
+  to support interactive tool execution with mid-command prompt handling (`Press <Enter>`, `Y or N?`)
+
 ## v7.12.0 (2025-07-10)
 
 ### Features

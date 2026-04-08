@@ -984,6 +984,10 @@ This method starts a process on the remote machine. It returns an `InteractiveSS
 
 This method waits for the host to become available. It tries to connect via SSH and raises a `TimeoutError` if the host does not wake up within the specified timeout.
 
+`interactive_custom_command(self, additional_parameters, cwd, env, press_enter, confirm)`
+
+This method executes an interactive command that requires user prompts mid-execution (e.g. `Press <Enter> to continue...` or `Y or N?`). When `press_enter=True`, it automatically responds to Enter prompts. When `confirm` is set (e.g. `"y"` or `"n"`), it sends that character in response to a Y/N confirmation prompt. Returns a `ConnectionCompletedProcess` object with both `stdout` and `raw_output` attributes containing the full command output.
+
 #### InteractiveSSHProcess
 
 `InteractiveSSHProcess` is a class that represents a process started on the remote machine using the `InteractiveSSHConnection` class. It provides methods to interact with the process.

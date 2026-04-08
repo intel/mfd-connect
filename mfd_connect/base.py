@@ -424,6 +424,29 @@ class Connection(ABC, metaclass=ConnectABCMeta):
         """Close connection with host."""
         pass
 
+    def interactive_custom_command(
+        self,
+        additional_parameters: str,
+        cwd: "str | None" = None,
+        env: "dict | None" = None,
+        press_enter: bool = True,
+        confirm: "str | None" = None,
+    ) -> "ConnectionCompletedProcess":
+        """
+        Execute an interactive command that requires user prompts (e.g. Press <Enter>, Y/N confirmation).
+
+        :param additional_parameters: Full command string or additional parameters to execute interactively
+        :param cwd: Current working directory for command execution
+        :param env: Environment variables for command execution
+        :param press_enter: Whether to automatically respond to "Press <Enter> to continue..." prompts
+        :param confirm: Character to send in response to a Y/N prompt (e.g. "y" or "n")
+        :return: ConnectionCompletedProcess object with return_code and raw_output attributes
+        :raises NotImplementedError: if not implemented for this connection type
+        """
+        raise NotImplementedError(
+            f"interactive_custom_command is not implemented for {self.__class__.__name__}"
+        )
+
     def _apply_cpu_affinity_win(self, *, pid: int, affinity_mask: int) -> None:
         """
         Apply calculated affinity_mask to given process ID under Windows OS using Windows API wrapper.
