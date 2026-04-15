@@ -546,11 +546,49 @@ class TestSSHConnection:
     def test_restart_platform_ssh(self, ssh, mocker):
         ssh._os_type = OSType.POSIX
         ssh._connection = mocker.create_autospec(mfd_connect.ssh.SSHClient)
+        mocker.patch("mfd_connect.ssh.read_uptime", side_effect=[100.0, 10.0])
         ssh.send_command_and_disconnect_platform = mocker.Mock()
+        ssh.wait_for_host = mocker.Mock()
         ssh.restart_platform()
         ssh.send_command_and_disconnect_platform.assert_called_with(
             "shutdown -r now",
         )
+        ssh.wait_for_host.assert_called_once_with(timeout=1)
+
+    def test_restart_platform_windows(self, ssh, mocker):
+        ssh._os_type = OSType.WINDOWS
+        ssh._connection = mocker.create_autospec(mfd_connect.ssh.SSHClient)
+        mocker.patch("mfd_connect.ssh.read_uptime", side_effect=[100.0, 10.0])
+        ssh.send_command_and_disconnect_platform = mocker.Mock()
+        ssh.wait_for_host = mocker.Mock()
+
+        ssh.restart_platform()
+
+        ssh.send_command_and_disconnect_platform.assert_called_once_with("shutdown /r /f -t 0")
+        ssh.wait_for_host.assert_called_once_with(timeout=1)
+
+    def test_restart_platform_timeout_error(self, ssh, mocker):
+        ssh._os_type = OSType.POSIX
+        ssh._connection = mocker.create_autospec(mfd_connect.ssh.SSHClient)
+        mocker.patch("mfd_connect.ssh.read_uptime", return_value=100.0)
+        ssh.send_command_and_disconnect_platform = mocker.Mock()
+        ssh.wait_for_host = mocker.Mock(side_effect=TimeoutError)
+
+        ssh.restart_platform()
+
+        ssh.wait_for_host.assert_called_once_with(timeout=1)
+
+    def test_restart_platform_uptime_not_decreased_then_rebooted(self, ssh, mocker):
+        ssh._os_type = OSType.POSIX
+        ssh._connection = mocker.create_autospec(mfd_connect.ssh.SSHClient)
+        mocker.patch("mfd_connect.ssh.read_uptime", side_effect=[100.0, 200.0, 10.0])
+        mocker.patch("mfd_connect.ssh.time.sleep")
+        ssh.send_command_and_disconnect_platform = mocker.Mock()
+        ssh.wait_for_host = mocker.Mock()
+
+        ssh.restart_platform()
+
+        assert ssh.wait_for_host.call_count == 2
 
     def test_shutdown_platform_ssh_no_sudo(self, ssh, mocker):
         ssh._os_type = OSType.POSIX
