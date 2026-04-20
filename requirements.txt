@@ -1,5 +1,5 @@
 pexpect~=4.8.0
-paramiko==3.4.0; platform_system != 'VMkernel'
+paramiko==4.0.0; platform_system != 'VMkernel'
 six
 rpyc~=6.0.0
 funcy~=1.14
