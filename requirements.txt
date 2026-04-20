@@ -3,7 +3,7 @@ paramiko==3.4.0; platform_system != 'VMkernel'
 six
 rpyc~=6.0.0
 funcy~=1.14
-scp~=0.13.4; platform_system != 'VMkernel'
+scp~=0.15.0; platform_system != 'VMkernel'
 pywin32; sys_platform == 'win32'
 mfd-typing >= 1.23.0, < 2
 mfd-common-libs>=1.11.0
