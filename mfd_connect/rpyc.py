@@ -613,31 +613,47 @@ class RPyCConnection(PythonConnection):
         os_mod = modules.os
         builtins_mod = modules.builtins
 
+        if shell is False:
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg=(
+                    "execute_command_as_user on Windows always wraps the command in "
+                    "cmd.exe /S /C to redirect stdout/stderr; 'shell=False' is ignored."
+                ),
+            )
+
         out_fd, out_path = tempfile_mod.mkstemp(suffix="_mfd_runas.out")
         err_fd, err_path = tempfile_mod.mkstemp(suffix="_mfd_runas.err")
         os_mod.close(out_fd)
         os_mod.close(err_fd)
 
         # Child is the user's own cmd.exe so the process owns the redirection.
-        cmd_line = f'cmd.exe /S /C "{command} > "{out_path}" 2> "{err_path}""'
+        # The doubled outer quotes around the entire payload are required by
+        # the `cmd.exe /S /C "..."` quoting rules so that inner quotes around
+        # the redirection paths are preserved.
+        cmd_line = f'cmd.exe /S /C ""{command} > "{out_path}" 2> "{err_path}"""'
 
-        logon_domain = domain if domain else "."
-        LOGON32_LOGON_INTERACTIVE = 2
-        LOGON32_PROVIDER_DEFAULT = 0
-        try:
-            token = win32security.LogonUser(
-                user,
-                logon_domain,
-                password,
-                LOGON32_LOGON_INTERACTIVE,
-                LOGON32_PROVIDER_DEFAULT,
-            )
-        except Exception as exc:
-            raise RunAsUserError(f"LogonUser failed for '{user}': {exc}") from exc
-
+        token = None
         h_profile = None
         h_proc = h_thread = None
+        stdout_bytes = b""
+        stderr_bytes = b""
+        return_code = -1
         try:
+            logon_domain = domain if domain else "."
+            LOGON32_LOGON_INTERACTIVE = 2
+            LOGON32_PROVIDER_DEFAULT = 0
+            try:
+                token = win32security.LogonUser(
+                    user,
+                    logon_domain,
+                    password,
+                    LOGON32_LOGON_INTERACTIVE,
+                    LOGON32_PROVIDER_DEFAULT,
+                )
+            except Exception as exc:
+                raise RunAsUserError(f"LogonUser failed for '{user}': {exc}") from exc
+
             try:
                 h_profile = win32profile.LoadUserProfile(token, {"UserName": user})
             except Exception:  # noqa: BLE001 - profile load is best-effort
@@ -665,18 +681,29 @@ class RPyCConnection(PythonConnection):
             except Exception as exc:
                 raise RunAsUserError(f"CreateProcessAsUser failed for '{user}': {exc}") from exc
 
-            timeout_ms = int(timeout * 1000) if timeout else win32event.INFINITE
+            timeout_ms = win32event.INFINITE if timeout is None else int(timeout * 1000)
             wait_result = win32event.WaitForSingleObject(h_proc, timeout_ms)
             if wait_result == win32event.WAIT_TIMEOUT:
                 try:
                     win32process.TerminateProcess(h_proc, 1)
-                finally:
+                except Exception:  # noqa: BLE001 - already failing
                     pass
                 raise TimeoutError(
                     f"execute_command_as_user timed out after {timeout}s for user '{user}'"
                 )
 
             return_code = int(win32process.GetExitCodeProcess(h_proc))
+
+            try:
+                with builtins_mod.open(out_path, "rb") as fh:
+                    stdout_bytes = fh.read()
+            except OSError:
+                stdout_bytes = b""
+            try:
+                with builtins_mod.open(err_path, "rb") as fh:
+                    stderr_bytes = fh.read()
+            except OSError:
+                stderr_bytes = b""
         finally:
             if h_proc is not None:
                 try:
@@ -688,31 +715,21 @@ class RPyCConnection(PythonConnection):
                     win32api.CloseHandle(h_thread)
                 except Exception:  # noqa: BLE001
                     pass
-            if h_profile is not None:
+            if h_profile is not None and token is not None:
                 try:
                     win32profile.UnloadUserProfile(token, h_profile)
                 except Exception:  # noqa: BLE001
                     pass
-            try:
-                win32api.CloseHandle(token)
-            except Exception:  # noqa: BLE001
-                pass
-
-        try:
-            with builtins_mod.open(out_path, "rb") as fh:
-                stdout_bytes = fh.read()
-        except OSError:
-            stdout_bytes = b""
-        try:
-            with builtins_mod.open(err_path, "rb") as fh:
-                stderr_bytes = fh.read()
-        except OSError:
-            stderr_bytes = b""
-        for path in (out_path, err_path):
-            try:
-                os_mod.unlink(path)
-            except OSError:
-                pass
+            if token is not None:
+                try:
+                    win32api.CloseHandle(token)
+                except Exception:  # noqa: BLE001
+                    pass
+            for path in (out_path, err_path):
+                try:
+                    os_mod.unlink(path)
+                except OSError:
+                    pass
 
         completed = CompletedProcess(
             args=command,

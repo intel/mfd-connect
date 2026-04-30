@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 """Unit tests for execute_command_as_user on RPyCConnection."""
 
-from subprocess import CompletedProcess
 from unittest.mock import patch, MagicMock
 
 import pytest

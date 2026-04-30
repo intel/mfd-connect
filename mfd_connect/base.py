@@ -329,8 +329,10 @@ class Connection(ABC, metaclass=ConnectABCMeta):
                     derive a clean environment from the target user profile.
         :param expected_return_codes: Return codes considered acceptable.
                                       ``None`` means any return code is acceptable.
-        :param shell: Run command through a shell wrapper (``cmd /c`` on Windows,
-                      ``/bin/sh -c`` on POSIX).
+        :param shell: Run command through a shell wrapper (``/bin/sh -c`` on POSIX).
+                      Ignored on Windows: the implementation always wraps the command
+                      in ``cmd.exe /S /C`` so that stdout/stderr can be redirected to
+                      temporary capture files owned by the impersonated user.
         :param custom_exception: Exception class to raise on unexpected return code;
                                  must inherit from CalledProcessError.
         :param skip_logging: Skip logging stdout/stderr.
