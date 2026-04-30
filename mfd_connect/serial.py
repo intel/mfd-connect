@@ -57,7 +57,7 @@ class SerialConnection(Connection):
         login_timeout: int = 15,
         is_veloce: bool = False,
         with_redirection: bool = True,
-        serial_logs_path: str | Path = None,
+        serial_logs_path: str | Path | None = None,
         model: "BaseModel | None" = None,
         cache_system_data: bool = True,
     ):

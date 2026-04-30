@@ -30,6 +30,10 @@ from mfd_connect.util.rpc_system_info_utils import (
     _get_bios_version_esxi,
     is_current_kernel_version_equal_or_higher,
     get_os_version_mellanox,
+    read_uptime,
+    _read_uptime_linux,
+    _read_uptime_uptime_command,
+    _read_uptime_windows,
 )
 
 
@@ -218,6 +222,118 @@ class TestRPCSystemInfoUtils:
         conn.execute_command = exec_command_mock
 
         assert get_os_version_mellanox(connection=conn) == system_version
+
+    def test_read_uptime_linux(self, conn, mocker):
+        conn.get_os_name = mocker.Mock(return_value=OSName.LINUX)
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(args="args", return_code=0, stdout="123.45 456.78")
+        )
+
+        assert read_uptime(connection=conn) == 123.45
+
+    def test_read_uptime_freebsd(self, conn, mocker):
+        conn.get_os_name = mocker.Mock(return_value=OSName.FREEBSD)
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(
+                args="args", return_code=0, stdout="10:30AM  up  1:30, 1 user, load averages: 0.10, 0.15, 0.20"
+            )
+        )
+
+        # 1 hour + 30 minutes = (1*3600) + (30*60) = 3600 + 1800 = 5400
+        assert read_uptime(connection=conn) == 5400.0
+
+    def test_read_uptime_esxi_with_days(self, conn, mocker):
+        conn.get_os_name = mocker.Mock(return_value=OSName.ESXI)
+        # uptime format: "11:11:13 up 6 days, 19:40:32, load average: 0.05, 0.04, 0.05"
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(
+                args="args", return_code=0, stdout="11:11:13 up 6 days, 19:40, 2 users, load average: 0.05, 0.04, 0.05"
+            )
+        )
+
+        # 6 days + 19 hours + 40 minutes = (6*86400) + (19*3600) + (40*60) = 518400 + 68400 + 2400 = 589200
+        assert read_uptime(connection=conn) == 589200.0
+
+    def test_read_uptime_esxi_without_days(self, conn, mocker):
+        conn.get_os_name = mocker.Mock(return_value=OSName.ESXI)
+        # uptime format: "10:05:22 up 2:30, 1 user, load average: 0.01, 0.02, 0.03"
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(
+                args="args", return_code=0, stdout="10:05:22 up 2:30, 1 user, load average: 0.01, 0.02, 0.03"
+            )
+        )
+
+        # 2 hours + 30 minutes = (2*3600) + (30*60) = 7200 + 1800 = 9000
+        assert read_uptime(connection=conn) == 9000.0
+
+    def test_read_uptime_freebsd_with_days(self, conn, mocker):
+        conn.get_os_name = mocker.Mock(return_value=OSName.FREEBSD)
+        # uptime format: "11:15AM  up  1 day, 2:30, 1 user, load averages: 0.00, 0.00, 0.00"
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(
+                args="args", return_code=0, stdout="11:15AM  up  1 day, 2:30, 1 user, load averages: 0.00, 0.00, 0.00"
+            )
+        )
+
+        # 1 day + 2 hours + 30 minutes = (1*86400) + (2*3600) + (30*60) = 86400 + 7200 + 1800 = 95400
+        assert read_uptime(connection=conn) == 95400.0
+
+    def test_read_uptime_freebsd_without_days(self, conn, mocker):
+        conn.get_os_name = mocker.Mock(return_value=OSName.FREEBSD)
+        # uptime format: "10:20AM  up  3:45, 1 user, load averages: 0.05, 0.04, 0.03"
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(
+                args="args", return_code=0, stdout="10:20AM  up  3:45, 1 user, load averages: 0.05, 0.04, 0.03"
+            )
+        )
+
+        # 3 hours + 45 minutes = (3*3600) + (45*60) = 10800 + 2700 = 13500
+        assert read_uptime(connection=conn) == 13500.0
+
+    def test_read_uptime_windows(self, conn, mocker):
+        conn.get_os_name = mocker.Mock(return_value=OSName.WINDOWS)
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(args="args", return_code=0, stdout="3210\r\n")
+        )
+
+        assert read_uptime(connection=conn) == 3210.0
+
+    def test_read_uptime_not_implemented(self, conn, mocker):
+        conn.get_os_name = mocker.Mock(return_value=OSName.MELLANOX)
+
+        with pytest.raises(NotImplementedError, match="Uptime reading not implemented"):
+            read_uptime(connection=conn)
+
+    def test_read_uptime_linux_invalid_output(self, conn, mocker):
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(args="args", return_code=0, stdout="not_a_number")
+        )
+
+        with pytest.raises(RuntimeError, match="Failed to read uptime from Linux host"):
+            _read_uptime_linux(connection=conn)
+
+    def test_read_uptime_uptime_command_no_match(self, conn, mocker):
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(args="args", return_code=0, stdout="10:00AM  up  just started")
+        )
+
+        assert _read_uptime_uptime_command(connection=conn) == 0.0
+
+    def test_read_uptime_uptime_command_invalid_output(self, conn, mocker):
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(args="args", return_code=0, stdout=None)
+        )
+
+        with pytest.raises(RuntimeError, match="Failed to read uptime from host via uptime command"):
+            _read_uptime_uptime_command(connection=conn)
+
+    def test_read_uptime_windows_invalid_output(self, conn, mocker):
+        conn.execute_command = mocker.Mock(
+            return_value=ConnectionCompletedProcess(args="args", return_code=0, stdout="not_a_number")
+        )
+
+        with pytest.raises(RuntimeError, match="Failed to read uptime from Windows host"):
+            _read_uptime_windows(connection=conn)
 
     def test__get_system_boot_time_linux(self, conn, mocker):
         expected_boot_time = "14:49:49 up 138 days"

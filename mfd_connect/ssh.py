@@ -12,6 +12,7 @@ from subprocess import CalledProcessError
 from typing import Iterable, Type, Optional, Dict, Tuple, List, Union, TYPE_CHECKING
 
 from mfd_common_libs import TimeoutCounter, add_logging_level, log_levels
+from mfd_connect.util.rpc_system_info_utils import read_uptime
 from mfd_typing.cpu_values import CPUArchitecture
 from mfd_typing.os_values import OSBitness, OSType, OSName
 from netaddr import IPAddress
@@ -1015,7 +1016,28 @@ class SSHConnection(AsyncConnection):
         """
         posix_command = self._adjust_command("shutdown -r now")
         restart_commands = {OSType.WINDOWS: "shutdown /r /f -t 0", OSType.POSIX: posix_command}
-        self.send_command_and_disconnect_platform(restart_commands[self._os_type])
+        restart_command = restart_commands[self._os_type]
+
+        # All OSes support uptime-based reboot verification
+        uptime_before = read_uptime(self)
+        self.send_command_and_disconnect_platform(restart_command)
+        while True:
+            try:
+                self.wait_for_host(timeout=1)
+            except TimeoutError:
+                logger.log(level=log_levels.MODULE_DEBUG, msg="Host is not available, means that it is rebooting.")
+                return
+
+            uptime_after = read_uptime(self)
+            if uptime_after < uptime_before:
+                logger.log(level=log_levels.MODULE_DEBUG, msg="Machine rebooted successfully.")
+                return
+
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg="Uptime is greater than earlier which means that machine did not reboot properly.",
+            )
+            time.sleep(5)
 
     def shutdown_platform(self) -> None:
         """

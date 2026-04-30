@@ -428,3 +428,66 @@ def is_current_kernel_version_equal_or_higher(connection: "Connection", version:
         raise RuntimeError(f"Wrong kernel version: {kernel_version}")
 
     return current_kernel_version >= version
+
+
+def read_uptime(connection: "Connection") -> float:
+    """Read uptime from host."""
+    os_name = connection.get_os_name()
+    if os_name == OSName.LINUX:
+        return _read_uptime_linux(connection)
+    if os_name in [OSName.FREEBSD, OSName.ESXI]:
+        return _read_uptime_uptime_command(connection)
+    if os_name == OSName.WINDOWS:
+        return _read_uptime_windows(connection)
+    else:
+        raise NotImplementedError(f"Uptime reading not implemented for {os_name.value}")
+
+
+def _read_uptime_linux(connection: "Connection") -> float:
+    """Read uptime from Linux host via /proc/uptime."""
+    out = connection.execute_command("cat /proc/uptime")
+    try:
+        uptime = float(out.stdout.split()[0])
+    except Exception as e:
+        raise RuntimeError(f"Failed to read uptime from Linux host. Error: {e}")
+    return uptime
+
+
+def _read_uptime_uptime_command(connection: "Connection") -> float:
+    """Read uptime from FreeBSD/ESXi host via uptime command."""
+    out = connection.execute_command("uptime")
+    try:
+        # Parse uptime output: "HH:MM:SS up X days, HH:MM" or "HH:MM:SS up HH:MM"
+        uptime_str = out.stdout.strip()
+        # Extract the part after "up "
+        parts = uptime_str.split("up", 1)[1].strip()
+
+        # Try to match pattern with days: "X days, HH:MM"
+        match = re.search(r"(?P<days>\d+)\s+days?,\s+(?P<hours>\d+):(?P<minutes>\d+)", parts)
+        if match:
+            total_seconds = (
+                int(match.group("days")) * 86400 + int(match.group("hours")) * 3600 + int(match.group("minutes")) * 60
+            )
+        else:
+            # Try to match pattern without days: "HH:MM"
+            match = re.search(r"(?P<hours>\d+):(?P<minutes>\d+)", parts)
+            if match:
+                total_seconds = int(match.group("hours")) * 3600 + int(match.group("minutes")) * 60
+            else:
+                total_seconds = 0
+
+        return float(total_seconds)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read uptime from host via uptime command. Error: {e}")
+
+
+def _read_uptime_windows(connection: "Connection") -> float:
+    """Read uptime from Windows host."""
+    command = "[math]::Floor(((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds)"
+    command = f'powershell.exe -OutPutFormat Text -nologo -noninteractive "{command}"'
+    out = connection.execute_command(command)
+    try:
+        uptime = float(out.stdout.strip())
+    except Exception as e:
+        raise RuntimeError(f"Failed to read uptime from Windows host. Error: {e}")
+    return uptime
