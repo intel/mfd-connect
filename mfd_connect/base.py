@@ -293,6 +293,58 @@ class Connection(ABC, metaclass=ConnectABCMeta):
         """
         pass
 
+    def execute_command_as_user(
+        self,
+        command: str,
+        *,
+        user: str,
+        password: str,
+        domain: str | None = None,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        env: dict | None = None,
+        expected_return_codes: Iterable | None = frozenset({0}),
+        shell: bool = False,
+        custom_exception: Type[CalledProcessError] = None,
+        skip_logging: bool = False,
+    ) -> "ConnectionCompletedProcess":
+        """
+        Run program as a different OS user and wait for its completion.
+
+        Provides a real privilege drop / privilege change instead of relying on
+        ``runas /trustlevel`` which is not honored consistently on Windows
+        Server 2025 over RPyC. On Windows uses LogonUser + CreateProcessAsUser
+        from pywin32. On POSIX uses ``sudo -S -u <user>`` (password forwarded
+        via stdin when provided, ``sudo -n`` when not).
+
+        :param command: Command to execute, with all necessary arguments.
+        :param user: Local or domain user account under which the process is launched.
+        :param password: Password for the user. Required on Windows. On POSIX may be
+                         empty when sudo is configured passwordless.
+        :param domain: Optional Windows domain. ``None`` (default) is the local machine.
+                       Ignored on POSIX.
+        :param cwd: Directory to start program execution in.
+        :param timeout: Program execution timeout, in seconds.
+        :param env: Environment to execute the program in. ``None`` lets the launcher
+                    derive a clean environment from the target user profile.
+        :param expected_return_codes: Return codes considered acceptable.
+                                      ``None`` means any return code is acceptable.
+        :param shell: Run command through a shell wrapper (``cmd /c`` on Windows,
+                      ``/bin/sh -c`` on POSIX).
+        :param custom_exception: Exception class to raise on unexpected return code;
+                                 must inherit from CalledProcessError.
+        :param skip_logging: Skip logging stdout/stderr.
+
+        :return: ConnectionCompletedProcess
+        :raises NotImplementedError: when the connection class does not implement it.
+        :raises RunAsUserNotSupportedError: when the connection's OS is not supported.
+        :raises RunAsUserError: when the launch itself fails (logon, redirect, etc.).
+        :raises ConnectionCalledProcessError: if program exits with an unexpected return code.
+        """
+        raise NotImplementedError(
+            f"execute_command_as_user is not implemented for {self.__class__.__name__}"
+        )
+
     def get_system_info(self) -> SystemInfo:
         """Get SystemInfo."""
         os_name = self.get_os_name()

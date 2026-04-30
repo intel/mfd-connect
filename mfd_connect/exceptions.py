@@ -81,6 +81,14 @@ class OsNotSupported(ModuleFrameworkDesignError):
     """Raises when OS is not supported."""
 
 
+class RunAsUserNotSupportedError(ModuleFrameworkDesignError):
+    """Raised when execute_command_as_user is not supported on this connection or OS."""
+
+
+class RunAsUserError(ModuleFrameworkDesignError):
+    """Raised on failure to launch a process as a different user (logon, profile, redirect)."""
+
+
 class CPUArchitectureNotSupported(ModuleFrameworkDesignError):
     """Raises when CPU Architecture is not supported."""
 

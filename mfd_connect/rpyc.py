@@ -26,6 +26,8 @@ from mfd_connect.exceptions import (
     OsNotSupported,
     ModuleFrameworkDesignError,
     RPyCDeploymentException,
+    RunAsUserError,
+    RunAsUserNotSupportedError,
 )
 from .process.rpyc import RPyCProcess, WindowsRPyCProcess, PosixRPyCProcess, ESXiRPyCProcess, WindowsRPyCProcessByStart
 from .util.decorators import clear_system_data_cache
@@ -477,6 +479,253 @@ class RPyCConnection(PythonConnection):
         errors = errors if errors else b""
         rc = int(proc.returncode)
         return CompletedProcess(args=command, stdout=output, stderr=errors, returncode=rc)
+
+    def execute_command_as_user(  # noqa: D102
+        self,
+        command: str,
+        *,
+        user: str,
+        password: str,
+        domain: str | None = None,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        env: dict[str, str] | None = None,
+        expected_return_codes: Iterable | None = frozenset({0}),
+        shell: bool = False,
+        custom_exception: Type[CalledProcessError] | None = None,
+        skip_logging: bool = False,
+    ) -> "ConnectionCompletedProcess":
+        timeout = self.default_timeout if timeout is None else timeout
+        os_name = self.get_os_name()
+        logger.log(
+            level=log_levels.CMD,
+            msg=(
+                f"Executing as user '{user}'"
+                f"{('@' + domain) if domain else ''} >{self._ip}> '{command}', cwd: {cwd}"
+            ),
+        )
+        if os_name == OSName.WINDOWS:
+            return self._execute_command_as_user_windows(
+                command,
+                user=user,
+                password=password,
+                domain=domain,
+                cwd=cwd,
+                timeout=timeout,
+                env=env,
+                expected_return_codes=expected_return_codes,
+                shell=shell,
+                custom_exception=custom_exception,
+                skip_logging=skip_logging,
+            )
+        if os_name in (OSName.LINUX, OSName.FREEBSD, OSName.ESXI):
+            return self._execute_command_as_user_posix(
+                command,
+                user=user,
+                password=password,
+                cwd=cwd,
+                timeout=timeout,
+                env=env,
+                expected_return_codes=expected_return_codes,
+                shell=shell,
+                custom_exception=custom_exception,
+                skip_logging=skip_logging,
+            )
+        raise RunAsUserNotSupportedError(
+            f"execute_command_as_user is not supported on OS {os_name} via {self.__class__.__name__}"
+        )
+
+    def _execute_command_as_user_posix(
+        self,
+        command: str,
+        *,
+        user: str,
+        password: str | None,
+        cwd: str | None,
+        timeout: int | None,
+        env: dict[str, str] | None,
+        expected_return_codes: Iterable | None,
+        shell: bool,
+        custom_exception: Type[CalledProcessError] | None,
+        skip_logging: bool,
+    ) -> "ConnectionCompletedProcess":
+        """Run command as another user on POSIX via sudo."""
+        inner = command
+        if shell:
+            inner = f"/bin/sh -c {shlex.quote(command)}"
+        if password:
+            wrapped = f"sudo -S -p '' -u {shlex.quote(user)} -- {inner}"
+            input_data = f"{password}\n"
+        else:
+            wrapped = f"sudo -n -u {shlex.quote(user)} -- {inner}"
+            input_data = None
+        return self.execute_command(
+            wrapped,
+            input_data=input_data,
+            cwd=cwd,
+            timeout=timeout,
+            env=env,
+            expected_return_codes=expected_return_codes,
+            shell=False,
+            custom_exception=custom_exception,
+            skip_logging=skip_logging,
+        )
+
+    def _execute_command_as_user_windows(
+        self,
+        command: str,
+        *,
+        user: str,
+        password: str,
+        domain: str | None,
+        cwd: str | None,
+        timeout: int | None,
+        env: dict[str, str] | None,
+        expected_return_codes: Iterable | None,
+        shell: bool,
+        custom_exception: Type[CalledProcessError] | None,
+        skip_logging: bool,
+    ) -> "ConnectionCompletedProcess":
+        """
+        Run command as another user on Windows.
+
+        Uses LogonUser + CreateProcessAsUser via pywin32. Stdout/stderr are
+        redirected to temporary files in the remote temp directory because
+        CreateProcessAsUser does not transparently inherit RPyC stdio handles.
+        """
+        if not password:
+            raise RunAsUserError("password is required to launch a process as another user on Windows")
+
+        modules = self.modules()
+        try:
+            win32security = modules.win32security
+            win32process = modules.win32process
+            win32event = modules.win32event
+            win32api = modules.win32api
+            win32con = modules.win32con
+            win32profile = modules.win32profile
+        except AttributeError as exc:  # pragma: no cover - pywin32 missing on responder
+            raise RunAsUserError(
+                "pywin32 is required on the remote host for execute_command_as_user on Windows"
+            ) from exc
+
+        tempfile_mod = modules.tempfile
+        os_mod = modules.os
+        builtins_mod = modules.builtins
+
+        out_fd, out_path = tempfile_mod.mkstemp(suffix="_mfd_runas.out")
+        err_fd, err_path = tempfile_mod.mkstemp(suffix="_mfd_runas.err")
+        os_mod.close(out_fd)
+        os_mod.close(err_fd)
+
+        # Child is the user's own cmd.exe so the process owns the redirection.
+        cmd_line = f'cmd.exe /S /C "{command} > "{out_path}" 2> "{err_path}""'
+
+        logon_domain = domain if domain else "."
+        LOGON32_LOGON_INTERACTIVE = 2
+        LOGON32_PROVIDER_DEFAULT = 0
+        try:
+            token = win32security.LogonUser(
+                user,
+                logon_domain,
+                password,
+                LOGON32_LOGON_INTERACTIVE,
+                LOGON32_PROVIDER_DEFAULT,
+            )
+        except Exception as exc:
+            raise RunAsUserError(f"LogonUser failed for '{user}': {exc}") from exc
+
+        h_profile = None
+        h_proc = h_thread = None
+        try:
+            try:
+                h_profile = win32profile.LoadUserProfile(token, {"UserName": user})
+            except Exception:  # noqa: BLE001 - profile load is best-effort
+                h_profile = None
+
+            env_block = win32profile.CreateEnvironmentBlock(token, False) if env is None else env
+
+            si = win32process.STARTUPINFO()
+            si.dwFlags = win32con.STARTF_USESHOWWINDOW
+            si.wShowWindow = win32con.SW_HIDE
+
+            try:
+                h_proc, h_thread, _pid, _tid = win32process.CreateProcessAsUser(
+                    token,
+                    None,
+                    cmd_line,
+                    None,
+                    None,
+                    False,
+                    win32con.CREATE_NO_WINDOW | win32con.CREATE_UNICODE_ENVIRONMENT,
+                    env_block,
+                    cwd,
+                    si,
+                )
+            except Exception as exc:
+                raise RunAsUserError(f"CreateProcessAsUser failed for '{user}': {exc}") from exc
+
+            timeout_ms = int(timeout * 1000) if timeout else win32event.INFINITE
+            wait_result = win32event.WaitForSingleObject(h_proc, timeout_ms)
+            if wait_result == win32event.WAIT_TIMEOUT:
+                try:
+                    win32process.TerminateProcess(h_proc, 1)
+                finally:
+                    pass
+                raise TimeoutError(
+                    f"execute_command_as_user timed out after {timeout}s for user '{user}'"
+                )
+
+            return_code = int(win32process.GetExitCodeProcess(h_proc))
+        finally:
+            if h_proc is not None:
+                try:
+                    win32api.CloseHandle(h_proc)
+                except Exception:  # noqa: BLE001
+                    pass
+            if h_thread is not None:
+                try:
+                    win32api.CloseHandle(h_thread)
+                except Exception:  # noqa: BLE001
+                    pass
+            if h_profile is not None:
+                try:
+                    win32profile.UnloadUserProfile(token, h_profile)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                win32api.CloseHandle(token)
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            with builtins_mod.open(out_path, "rb") as fh:
+                stdout_bytes = fh.read()
+        except OSError:
+            stdout_bytes = b""
+        try:
+            with builtins_mod.open(err_path, "rb") as fh:
+                stderr_bytes = fh.read()
+        except OSError:
+            stderr_bytes = b""
+        for path in (out_path, err_path):
+            try:
+                os_mod.unlink(path)
+            except OSError:
+                pass
+
+        completed = CompletedProcess(
+            args=command,
+            stdout=stdout_bytes,
+            stderr=stderr_bytes,
+            returncode=return_code,
+        )
+        return self._handle_execution_outcome(
+            completed_process=completed,
+            expected_return_codes=expected_return_codes,
+            custom_exception=custom_exception,
+            skip_logging=skip_logging,
+        )
 
     def send_command_and_disconnect_platform(self, command: str) -> None:
         """
