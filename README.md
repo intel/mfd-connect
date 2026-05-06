@@ -8,7 +8,7 @@
 ```python
 from mfd_connect import LocalConnection
 
-conn = LocalConnection()
+conn = LocalConnection
 
 proc = conn.start_process(command="dir C:\\", shell=True)
 for line in proc.get_stdout_iter():
