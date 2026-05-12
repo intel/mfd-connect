@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 import subprocess
 import time
+import types
 from pathlib import Path
 from subprocess import CompletedProcess, CalledProcessError
 from unittest.mock import patch
@@ -16,7 +17,9 @@ from mfd_connect.base import ConnectionCompletedProcess
 from mfd_connect.exceptions import (
     ConnectionCalledProcessError,
     ModuleFrameworkDesignError,
+    OsNotSupported,
     RPyCDeploymentException,
+    RunAsUserError,
 )
 from mfd_connect.process.rpyc import PosixRPyCProcess, WindowsRPyCProcess, ESXiRPyCProcess
 
@@ -257,6 +260,346 @@ class TestRPyCConnection:
             shell=False,
             stderr_to_stdout=False,
             timeout=None,
+        )
+
+    def test_ensure_remote_winapi_helper_missing_local_script(self, rpyc, mocker):
+        mocker.patch("mfd_connect.rpyc.Path.exists", return_value=False)
+        with pytest.raises(RunAsUserError, match="WinAPI helper script not found"):
+            rpyc._ensure_remote_winapi_helper()
+
+    def test_ensure_remote_winapi_helper_uploads_script(self, rpyc, mocker):
+        mocker.patch("mfd_connect.rpyc.Path.exists", return_value=True)
+        mocker.patch("mfd_connect.rpyc.Path.read_text", return_value="print('ok')")
+
+        remote_os = mocker.Mock()
+        remote_os.path.join.side_effect = lambda *parts: "\\".join(parts)
+        remote_tempfile = mocker.Mock()
+        remote_tempfile.gettempdir.return_value = "C:\\Temp"
+        remote_tempfile.mkstemp.return_value = (11, "C:\\Temp\\mfd_connect\\runas.py")
+        remote_pathlib = mocker.Mock()
+        remote_modules = mocker.Mock(os=remote_os, tempfile=remote_tempfile, pathlib=remote_pathlib)
+        rpyc.modules = mocker.Mock(return_value=remote_modules)
+
+        remote_path = mocker.Mock()
+        remote_pathlib.Path.return_value = remote_path
+
+        helper_path = rpyc._ensure_remote_winapi_helper()
+
+        assert helper_path == "C:\\Temp\\mfd_connect\\runas.py"
+        remote_pathlib.Path.assert_any_call("C:\\Temp\\mfd_connect")
+        remote_pathlib.Path.assert_any_call("C:\\Temp\\mfd_connect\\runas.py")
+        remote_os.close.assert_called_once_with(11)
+        remote_path.write_text.assert_called_once_with("print('ok')", encoding="utf-8")
+
+    def test_execute_command_as_user_dispatch_windows(self, rpyc, mocker):
+        rpyc._os_type = OSType.WINDOWS
+        rpyc._execute_command_as_user_windows = mocker.Mock(return_value="done")
+
+        result = rpyc.execute_command_as_user(command="whoami", user="john", password="pwd")
+
+        assert result == "done"
+        rpyc._execute_command_as_user_windows.assert_called_once()
+
+    def test_execute_command_as_user_not_supported(self, rpyc):
+        rpyc._os_type = OSType.POSIX
+        with pytest.raises(OsNotSupported, match="Run-as-user execution is not supported"):
+            rpyc.execute_command_as_user(command="whoami", user="john", password="pwd")
+
+    def test_execute_command_as_user_windows_success_flow(self, rpyc, mocker):
+        rpyc._os_type = OSType.WINDOWS
+        rpyc._ip = "10.10.10.10"
+        rpyc._default_timeout = 11
+        rpyc._ensure_remote_winapi_helper = mocker.Mock(return_value="C:\\Temp\\runas.py")
+
+        path_objects = {}
+        file_bytes = {
+            "C:\\Users\\john\\AppData\\Local\\Temp\\mfd_runas_1\\stdout.bin": b"std-out",
+            "C:\\Users\\john\\AppData\\Local\\Temp\\mfd_runas_1\\stderr.bin": b"",
+        }
+
+        def _path_object(path):
+            if path not in path_objects:
+                obj = mocker.Mock()
+                obj.write_text = mocker.Mock()
+                obj.read_bytes = mocker.Mock(side_effect=lambda: file_bytes.get(path, b""))
+                obj.read_text = mocker.Mock(return_value="3")
+                path_objects[path] = obj
+            return path_objects[path]
+
+        remote_os = mocker.Mock()
+        remote_os.path.join.side_effect = lambda *parts: "\\".join(parts)
+        remote_os.path.isdir.return_value = True
+        remote_os.path.exists.side_effect = lambda p: p in file_bytes
+        remote_os.environ = {"SystemRoot": "C:\\Windows"}
+
+        remote_tempfile = mocker.Mock()
+        remote_tempfile.mkdtemp.return_value = "C:\\Users\\john\\AppData\\Local\\Temp\\mfd_runas_1"
+
+        remote_pathlib = mocker.Mock()
+        remote_pathlib.Path.side_effect = _path_object
+
+        def _run_side_effect(cmd, **_kwargs):
+            if isinstance(cmd, list) and cmd[0] == "python.exe":
+                return CompletedProcess(args=cmd, returncode=0, stdout=b'{"ok": true, "returncode": 3}', stderr=b"")
+            return CompletedProcess(args=cmd, returncode=0, stdout=b"", stderr=b"")
+
+        remote_subprocess = mocker.Mock()
+        remote_subprocess.run.side_effect = _run_side_effect
+
+        remote_modules = types.SimpleNamespace(
+            tempfile=remote_tempfile,
+            os=remote_os,
+            pathlib=remote_pathlib,
+            subprocess=remote_subprocess,
+            sys=types.SimpleNamespace(executable="python.exe"),
+        )
+        rpyc.modules = mocker.Mock(return_value=remote_modules)
+        rpyc._handle_execution_outcome = mocker.Mock(return_value="handled")
+
+        command = 'echo "hello world"'
+        result = rpyc._execute_command_as_user_windows(
+            command=command,
+            user="john",
+            password="secret",
+            domain=".",
+            env={"A": "B"},
+            timeout=None,
+            expected_return_codes={0, 3},
+        )
+
+        assert result == "handled"
+        completed_process = rpyc._handle_execution_outcome.call_args.kwargs["completed_process"]
+        assert completed_process.returncode == 3
+        assert completed_process.stdout == b"std-out"
+        assert completed_process.stderr == b""
+
+        runner_bat_path = "C:\\Users\\john\\AppData\\Local\\Temp\\mfd_runas_1\\run_command_as_user.bat"
+        runner_call = path_objects[runner_bat_path].write_text.call_args.args[0]
+        assert command in runner_call
+        assert "cmd.exe /d /s /c" not in runner_call
+
+        helper_call = next(
+            call
+            for call in remote_subprocess.run.call_args_list
+            if call.args and isinstance(call.args[0], list) and call.args[0][0] == "python.exe"
+        )
+        assert len(helper_call.args[0]) == 2
+        assert "stdin" not in helper_call.kwargs
+        assert isinstance(helper_call.kwargs["input"], bytes)
+
+    def test_execute_command_as_user_windows_helper_error_falls_back_to_stderr(self, rpyc, mocker):
+        rpyc._os_type = OSType.WINDOWS
+        rpyc._ip = "10.10.10.10"
+        rpyc._ensure_remote_winapi_helper = mocker.Mock(return_value="C:\\Temp\\runas.py")
+
+        path_objects = {}
+
+        def _path_object(path):
+            if path not in path_objects:
+                obj = mocker.Mock()
+                obj.write_text = mocker.Mock()
+                obj.read_bytes = mocker.Mock(return_value=b"")
+                obj.read_text = mocker.Mock(return_value="not-an-int")
+                path_objects[path] = obj
+            return path_objects[path]
+
+        remote_os = mocker.Mock()
+        remote_os.path.join.side_effect = lambda *parts: "\\".join(parts)
+        remote_os.path.isdir.return_value = False
+        remote_os.path.exists.return_value = False
+        remote_os.environ = {"SystemRoot": "C:\\Windows"}
+
+        remote_tempfile = mocker.Mock()
+        remote_tempfile.mkdtemp.return_value = "C:\\Windows\\Temp\\mfd_runas_2"
+
+        remote_pathlib = mocker.Mock()
+        remote_pathlib.Path.side_effect = _path_object
+
+        def _run_side_effect(cmd, **_kwargs):
+            if isinstance(cmd, list) and cmd[0] == "python.exe":
+                payload = b'{"ok": false, "error": "CreateProcessWithLogonW failed"}'
+                return CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr=b"helper stderr")
+            return CompletedProcess(args=cmd, returncode=0, stdout=b"", stderr=b"")
+
+        remote_subprocess = mocker.Mock()
+        remote_subprocess.run.side_effect = _run_side_effect
+
+        remote_modules = types.SimpleNamespace(
+            tempfile=remote_tempfile,
+            os=remote_os,
+            pathlib=remote_pathlib,
+            subprocess=remote_subprocess,
+            sys=types.SimpleNamespace(executable="python.exe"),
+        )
+        rpyc.modules = mocker.Mock(return_value=remote_modules)
+        rpyc._handle_execution_outcome = mocker.Mock(return_value="handled")
+
+        rpyc._execute_command_as_user_windows(
+            command="echo hello",
+            user="john",
+            password="secret",
+            timeout=1,
+            expected_return_codes=None,
+        )
+
+        completed_process = rpyc._handle_execution_outcome.call_args.kwargs["completed_process"]
+        assert completed_process.returncode == 1
+        assert b"CreateProcessWithLogonW failed" in completed_process.stderr
+        assert b"helper stderr" in completed_process.stderr
+
+    def test_execute_command_as_user_windows_prefers_runner_return_code_file(self, rpyc, mocker):
+        rpyc._os_type = OSType.WINDOWS
+        rpyc._ip = "10.10.10.10"
+        rpyc._default_timeout = 11
+        rpyc._ensure_remote_winapi_helper = mocker.Mock(return_value="C:\\Temp\\runas.py")
+
+        path_objects = {}
+
+        def _path_object(path):
+            if path not in path_objects:
+                obj = mocker.Mock()
+                obj.write_text = mocker.Mock()
+                obj.read_bytes = mocker.Mock(return_value=b"Administrator privileges are needed to run application.")
+                obj.read_text = mocker.Mock(return_value="1")
+                path_objects[path] = obj
+            return path_objects[path]
+
+        remote_os = mocker.Mock()
+        remote_os.path.join.side_effect = lambda *parts: "\\".join(parts)
+        remote_os.path.isdir.return_value = True
+
+        def _exists_side_effect(path):
+            return path.endswith("stdout.bin") or path.endswith("stderr.bin") or path.endswith("return_code.txt")
+
+        remote_os.path.exists.side_effect = _exists_side_effect
+        remote_os.environ = {"SystemRoot": "C:\\Windows"}
+
+        remote_tempfile = mocker.Mock()
+        remote_tempfile.mkdtemp.return_value = "C:\\Users\\john\\AppData\\Local\\Temp\\mfd_runas_4"
+
+        remote_pathlib = mocker.Mock()
+        remote_pathlib.Path.side_effect = _path_object
+
+        def _run_side_effect(cmd, **_kwargs):
+            if isinstance(cmd, list) and cmd[0] == "python.exe":
+                # Helper wrapper exits successfully but command rc persisted in file is 1.
+                return CompletedProcess(args=cmd, returncode=0, stdout=b'{"ok": true, "returncode": 0}', stderr=b"")
+            return CompletedProcess(args=cmd, returncode=0, stdout=b"", stderr=b"")
+
+        remote_subprocess = mocker.Mock()
+        remote_subprocess.run.side_effect = _run_side_effect
+
+        remote_modules = types.SimpleNamespace(
+            tempfile=remote_tempfile,
+            os=remote_os,
+            pathlib=remote_pathlib,
+            subprocess=remote_subprocess,
+            sys=types.SimpleNamespace(executable="python.exe"),
+        )
+        rpyc.modules = mocker.Mock(return_value=remote_modules)
+        rpyc._handle_execution_outcome = mocker.Mock(return_value="handled")
+
+        rpyc._execute_command_as_user_windows(
+            command=r"C:\\NVMUPDATE\\Winx64\\nvmupdatew64e.exe -i -l",
+            user="john",
+            password="secret",
+            domain=".",
+            timeout=60,
+            expected_return_codes={0, 1},
+        )
+
+        completed_process = rpyc._handle_execution_outcome.call_args.kwargs["completed_process"]
+        assert completed_process.returncode == 1
+
+    def test_execute_command_as_user_windows_no_timeout_keeps_helper_unbounded(self, rpyc, mocker):
+        rpyc._os_type = OSType.WINDOWS
+        rpyc._ip = "10.10.10.10"
+        rpyc._default_timeout = None
+        rpyc._ensure_remote_winapi_helper = mocker.Mock(return_value="C:\\Temp\\runas.py")
+
+        path_objects = {}
+
+        def _path_object(path):
+            if path not in path_objects:
+                obj = mocker.Mock()
+                obj.write_text = mocker.Mock()
+                obj.read_bytes = mocker.Mock(return_value=b"")
+                obj.read_text = mocker.Mock(return_value="0")
+                path_objects[path] = obj
+            return path_objects[path]
+
+        remote_os = mocker.Mock()
+        remote_os.path.join.side_effect = lambda *parts: "\\".join(parts)
+        remote_os.path.isdir.return_value = True
+        remote_os.path.exists.return_value = False
+        remote_os.environ = {"SystemRoot": "C:\\Windows"}
+
+        remote_tempfile = mocker.Mock()
+        remote_tempfile.mkdtemp.return_value = "C:\\Users\\john\\AppData\\Local\\Temp\\mfd_runas_3"
+
+        remote_pathlib = mocker.Mock()
+        remote_pathlib.Path.side_effect = _path_object
+
+        def _run_side_effect(cmd, **_kwargs):
+            if isinstance(cmd, list) and cmd[0] == "python.exe":
+                return CompletedProcess(args=cmd, returncode=0, stdout=b'{"ok": true, "returncode": 0}', stderr=b"")
+            return CompletedProcess(args=cmd, returncode=0, stdout=b"", stderr=b"")
+
+        remote_subprocess = mocker.Mock()
+        remote_subprocess.run.side_effect = _run_side_effect
+
+        remote_modules = types.SimpleNamespace(
+            tempfile=remote_tempfile,
+            os=remote_os,
+            pathlib=remote_pathlib,
+            subprocess=remote_subprocess,
+            sys=types.SimpleNamespace(executable="python.exe"),
+        )
+        rpyc.modules = mocker.Mock(return_value=remote_modules)
+        rpyc._handle_execution_outcome = mocker.Mock(return_value="handled")
+
+        rpyc._execute_command_as_user_windows(
+            command="echo hello",
+            user="john",
+            password="secret",
+            timeout=None,
+            expected_return_codes={0},
+        )
+
+        helper_call = next(
+            call
+            for call in remote_subprocess.run.call_args_list
+            if call.args and isinstance(call.args[0], list) and call.args[0][0] == "python.exe"
+        )
+        assert helper_call.kwargs["timeout"] is None
+
+    def test_create_user_delegates_to_utility(self, rpyc, mocker):
+        util_call = mocker.patch("mfd_connect.rpyc.create_user_util", return_value="created")
+
+        result = rpyc.create_user("john", "pwd")
+
+        assert result == "created"
+        util_call.assert_called_once_with(
+            connection=rpyc,
+            username="john",
+            password="pwd",
+            expected_return_codes=frozenset({0}),
+            custom_exception=None,
+            skip_logging=False,
+        )
+
+    def test_delete_user_delegates_to_utility(self, rpyc, mocker):
+        util_call = mocker.patch("mfd_connect.rpyc.delete_user_util", return_value="deleted")
+
+        result = rpyc.delete_user("john")
+
+        assert result == "deleted"
+        util_call.assert_called_once_with(
+            connection=rpyc,
+            username="john",
+            expected_return_codes=frozenset({0}),
+            custom_exception=None,
+            skip_logging=False,
         )
 
     @pytest.fixture()
