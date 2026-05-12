@@ -32,6 +32,7 @@ Otherwise, error could be raised due to inconsistency.
   - [Affinity setting](#affinity-setting)
   - [Path manipulation](#path-manipulation)
   - [Additional info about specific Connection implementation](#additional-info-about-specific-connection-implementation)
+  - [RPyCConnection Windows run-as-user and user management](#rpycconnection-windows-run-as-user-and-user-management)
   - [Execute command with sudo](#execute-command-with-sudo)
   - [Execute background command with SSHConnection](#execute-background-command-with-sshconnection)
   - [Recommendation for Connection choice](#recommendation-for-connection-choice)
@@ -744,6 +745,43 @@ Below some known issues correlated with this functionality:
 * Windows: BgServingThread **must be enabled** for async to properly read process output
 * Linux: BgServingThread **must be enabled** to read process output
 * Simics: There is knows issue with long connection time if BgServingThread is enabled, **recommend disabling it**
+
+### RPyCConnection Windows run-as-user and user management
+
+On Windows targets, `RPyCConnection` provides additional helpers for running a command as another user and for local user lifecycle operations.
+
+Available methods:
+
+* `execute_command_as_user(command: str, *, user: str, password: str, domain: str | None = None, cwd: str | None = None, timeout: int | None = None, env: dict[str, str] | None = None, expected_return_codes: Iterable | None = frozenset({0}), shell: bool = False, custom_exception: Type[CalledProcessError] | None = None, skip_logging: bool = False) -> ConnectionCompletedProcess`
+* `create_user(username: str, password: str, *, expected_return_codes: Iterable | None = frozenset({0}), custom_exception: Type[CalledProcessError] | None = None, skip_logging: bool = False) -> ConnectionCompletedProcess`
+* `delete_user(username: str, *, expected_return_codes: Iterable | None = frozenset({0}), custom_exception: Type[CalledProcessError] | None = None, skip_logging: bool = False) -> ConnectionCompletedProcess`
+
+Notes:
+
+* The methods above are supported only on Windows targets.
+* `execute_command_as_user` uses a temporary WinAPI helper on the remote host (`CreateProcessWithLogonW`).
+* For local accounts, use `domain=None` (or `domain="."`).
+
+Example:
+
+```python
+from mfd_connect import RPyCConnection
+
+conn = RPyCConnection(ip="10.10.10.10")
+
+conn.create_user(username="mfd_temp_user", password="pass")
+try:
+  result = conn.execute_command_as_user(
+    command="whoami",
+    user="mfd_temp_user",
+    password="pass",
+    domain=".",
+    timeout=60,
+  )
+  print(result.stdout)
+finally:
+  conn.delete_user(username="mfd_temp_user")
+```
 
 #### PythonConnection/SSHConnection output redirection to file
 

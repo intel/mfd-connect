@@ -3,6 +3,8 @@
 """RPyC Connection implementation."""
 
 import codecs
+import base64
+import json
 import logging
 import shlex
 import time
@@ -26,9 +28,11 @@ from mfd_connect.exceptions import (
     OsNotSupported,
     ModuleFrameworkDesignError,
     RPyCDeploymentException,
+    RunAsUserError,
 )
 from .process.rpyc import RPyCProcess, WindowsRPyCProcess, PosixRPyCProcess, ESXiRPyCProcess, WindowsRPyCProcessByStart
 from .util.decorators import clear_system_data_cache
+from .util.account_utils import create_user as create_user_util, delete_user as delete_user_util
 
 if typing.TYPE_CHECKING:
     from io import TextIOWrapper
@@ -114,6 +118,34 @@ class RPyCConnection(PythonConnection):
         self._ipv6: bool = ipv6
         self._establish_connection(retry_timeout=retry_timeout, retry_time=retry_time)
 
+    def _ensure_remote_winapi_helper(self) -> str:
+        """
+        Upload a fresh WinAPI helper script copy to remote host.
+
+        :return: Absolute path to helper script on remote host.
+        :raises RunAsUserError: If local helper script does not exist.
+        """
+        local_helper_path = Path(__file__).resolve().parent / "util" / "runas_winapi_script.py"
+        if not local_helper_path.exists():
+            raise RunAsUserError(f"WinAPI helper script not found: {local_helper_path}")
+
+        helper_code = local_helper_path.read_text(encoding="utf-8")
+
+        remote_os = self.modules().os
+        remote_pathlib = self.modules().pathlib
+        remote_tempfile = self.modules().tempfile
+
+        remote_helper_dir = remote_os.path.join(remote_tempfile.gettempdir(), "mfd_connect")
+        remote_pathlib.Path(remote_helper_dir).mkdir(parents=True, exist_ok=True)
+        helper_handle, remote_helper_path = remote_tempfile.mkstemp(
+            prefix="runas_winapi_script_",
+            suffix=".py",
+            dir=remote_helper_dir,
+        )
+        remote_os.close(helper_handle)
+        remote_pathlib.Path(remote_helper_path).write_text(helper_code, encoding="utf-8")
+        return remote_helper_path
+
     def _establish_connection(self, *, retry_timeout: Optional[int], retry_time: int) -> None:
         """
         Establish a connection to the machine.
@@ -155,6 +187,13 @@ class RPyCConnection(PythonConnection):
             self.__establish_connection(retry_timeout=retry_timeout, retry_time=retry_time)
 
     def __establish_connection(self, *, retry_timeout: Optional[int], retry_time: int) -> None:
+        """
+        Establish low-level RPyC connection sequence.
+
+        :param retry_timeout: Time window in seconds for host availability checks.
+        :param retry_time: Delay in seconds between retry attempts.
+        :return: ``None``
+        """
         # flow for tries of connecting
         if retry_timeout:
             logger.log(
@@ -267,6 +306,329 @@ class RPyCConnection(PythonConnection):
             service=ClassicService,
             keepalive=True,
             config={"sync_request_timeout": self._connection_timeout},
+        )
+
+    def _execute_command_as_user_windows(
+        self,
+        command: str,
+        *,
+        user: str,
+        password: str,
+        domain: str | None = None,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        env: dict[str, str] | None = None,
+        expected_return_codes: Iterable | None = None,
+        shell: bool = False,
+        custom_exception: Type[CalledProcessError] | None = None,
+        skip_logging: bool = False,
+    ) -> "ConnectionCompletedProcess":
+        """
+        Run command as another user on Windows.
+
+        The method uses a WinAPI helper script based on
+        CreateProcessWithLogonW. The helper is uploaded for each call and
+        removed during cleanup after execution.
+
+        :param command: Command line to execute as target user.
+        :param user: Target account user name.
+        :param password: Target account password.
+        :param domain: Account domain name; use ``None`` or ``"."`` for local account.
+        :param cwd: Working directory for launched command.
+        :param timeout: Timeout in seconds for command execution.
+        :param env: Environment variables passed to helper process.
+        :param expected_return_codes: Return codes treated as successful.
+        :param shell: Reserved for API compatibility; command is always wrapped for ``cmd.exe``.
+        :param custom_exception: Exception class raised for unexpected return code.
+        :param skip_logging: Skip stdout/stderr logging for this execution.
+        :return: Completed process result for executed command.
+        :raises RunAsUserError: If called on non-Windows host or credentials are missing.
+        """
+        if not user:
+            raise RunAsUserError("user is required to launch a process as another user on Windows")
+
+        if not password:
+            raise RunAsUserError("password is required to launch a process as another user on Windows")
+
+        timeout = self.default_timeout if timeout is None else timeout
+        timeout_string = " " if timeout is None else f" with timeout {timeout} seconds"
+        logger.log(level=log_levels.CMD, msg=f"Executing as user >{self._ip}> '{command}', cwd: {cwd}{timeout_string}")
+
+        remote_modules = self.modules()
+        remote_tempfile = remote_modules.tempfile
+        remote_os = remote_modules.os
+        remote_pathlib = remote_modules.pathlib
+        remote_subprocess = remote_modules.subprocess
+        remote_python = remote_modules.sys.executable
+        winapi_helper_remote_path = self._ensure_remote_winapi_helper()
+
+        user_temp_dir = remote_os.path.join("C:\\", "Users", user, "AppData", "Local", "Temp")
+        if not remote_os.path.isdir(user_temp_dir):
+            user_temp_dir = remote_os.path.join(remote_os.environ.get("SystemRoot", "C:\\Windows"), "Temp")
+        work_dir = remote_tempfile.mkdtemp(prefix="mfd_runas_", dir=user_temp_dir)
+        grant_identity = f"{domain}\\{user}" if domain and domain not in (".", "") else user
+        try:
+            remote_subprocess.run(
+                f'icacls "{work_dir}" /grant "{grant_identity}:(OI)(CI)F" /T /C',
+                shell=True,
+                stdout=DEVNULL,
+                stderr=DEVNULL,
+                check=False,
+            )
+        except Exception as acl_error:
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg=f"Failed to grant ACL for run-as temp dir {work_dir} to {grant_identity}: {acl_error}",
+            )
+
+        stdout_path = remote_os.path.join(work_dir, "stdout.bin")
+        stderr_path = remote_os.path.join(work_dir, "stderr.bin")
+        return_code_path = remote_os.path.join(work_dir, "return_code.txt")
+        runner_bat_path = remote_os.path.join(work_dir, "run_command_as_user.bat")
+
+        def _read_file_bytes(path: str) -> bytes:
+            """
+            Read file content from remote host.
+
+            :param path: Remote file path.
+            :return: File content as bytes, or empty bytes if file does not exist.
+            """
+            if remote_os.path.exists(path):
+                return remote_pathlib.Path(path).read_bytes()
+            return b""
+
+        def _read_return_code(default_code: int = 1) -> int:
+            """
+            Read command return code from remote helper output file.
+
+            :param default_code: Value used if file is missing or invalid.
+            :return: Parsed integer return code.
+            """
+            if not remote_os.path.exists(return_code_path):
+                return default_code
+            raw_code = remote_pathlib.Path(return_code_path).read_text(encoding="ascii", errors="ignore").strip()
+            try:
+                return int(raw_code)
+            except ValueError:
+                return default_code
+
+        def _parse_helper_json(raw_stdout: str) -> dict[str, Any]:
+            """
+            Parse JSON emitted by helper process.
+
+            :param raw_stdout: Raw helper stdout text.
+            :return: Parsed helper payload dictionary.
+            """
+            if not raw_stdout:
+                return {}
+            try:
+                return json.loads(raw_stdout)
+            except json.JSONDecodeError:
+                lines = [line.strip() for line in raw_stdout.splitlines() if line.strip()]
+                if not lines:
+                    return {}
+                try:
+                    return json.loads(lines[-1])
+                except json.JSONDecodeError:
+                    return {"ok": False, "error": f"Invalid helper output: {raw_stdout}"}
+
+        try:
+            runner_content = (
+                "@echo off\r\n"
+                f'{command} > "{stdout_path}" 2> "{stderr_path}"\r\n'
+                f'echo %errorlevel% > "{return_code_path}"\r\n'
+            )
+            remote_pathlib.Path(runner_bat_path).write_text(runner_content, encoding="ascii", errors="ignore")
+
+            winapi_payload = {
+                "user": user,
+                "password": password,
+                "domain": domain,
+                "cwd": cwd,
+                "timeout": timeout,
+                "runner_bat_path": runner_bat_path,
+            }
+            encoded_payload = base64.b64encode(json.dumps(winapi_payload).encode("utf-8")).decode("ascii")
+
+            # Keep "no timeout" semantics when effective timeout is None.
+            helper_timeout = (timeout + 30) if timeout is not None else None
+            helper_result = remote_subprocess.run(
+                [remote_python, winapi_helper_remote_path],
+                input=encoded_payload.encode("ascii"),
+                cwd=cwd,
+                env=env,
+                shell=False,
+                stdout=PIPE,
+                stderr=PIPE,
+                check=False,
+                timeout=helper_timeout,
+            )
+
+            helper_stdout = helper_result.stdout.decode("utf-8", errors="backslashreplace").strip()
+            helper_stderr = helper_result.stderr.decode("utf-8", errors="backslashreplace")
+            helper_data = _parse_helper_json(helper_stdout)
+
+            # Prefer return code persisted by the runner script because it reflects
+            # the executed command, not the helper wrapper process.
+            return_code = _read_return_code(default_code=int(helper_data.get("returncode", 1)))
+            stdout_bytes = _read_file_bytes(stdout_path)
+            stderr_bytes = _read_file_bytes(stderr_path)
+
+            if not helper_data.get("ok", False):
+                diagnostic_parts = []
+                if helper_data.get("error"):
+                    diagnostic_parts.append(str(helper_data.get("error")))
+                if helper_stderr:
+                    diagnostic_parts.append(helper_stderr)
+                if diagnostic_parts and not stderr_bytes:
+                    stderr_bytes = "\n".join(diagnostic_parts).encode("utf-8", errors="backslashreplace")
+        finally:
+            try:
+                remote_subprocess.run(
+                    f'rmdir /S /Q "{work_dir}"',
+                    shell=True,
+                    stdout=DEVNULL,
+                    stderr=DEVNULL,
+                    check=False,
+                )
+            except Exception as cleanup_error:
+                logger.log(
+                    level=log_levels.MODULE_DEBUG, msg=f"Failed to cleanup run-as temp dir {work_dir}: {cleanup_error}"
+                )
+            try:
+                remote_subprocess.run(
+                    f'del /F /Q "{winapi_helper_remote_path}"',
+                    shell=True,
+                    stdout=DEVNULL,
+                    stderr=DEVNULL,
+                    check=False,
+                )
+            except Exception as cleanup_error:
+                logger.log(
+                    level=log_levels.MODULE_DEBUG,
+                    msg=f"Failed to cleanup run-as helper {winapi_helper_remote_path}: {cleanup_error}",
+                )
+
+        completed = CompletedProcess(
+            args=command,
+            stdout=stdout_bytes,
+            stderr=stderr_bytes,
+            returncode=return_code,
+        )
+        return self._handle_execution_outcome(
+            completed_process=completed,
+            expected_return_codes=expected_return_codes,
+            custom_exception=custom_exception,
+            skip_logging=skip_logging,
+        )
+
+    def execute_command_as_user(
+        self,
+        command: str,
+        *,
+        user: str,
+        password: str,
+        domain: str | None = None,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        env: dict[str, str] | None = None,
+        expected_return_codes: Iterable | None = frozenset({0}),
+        shell: bool = False,
+        custom_exception: Type[CalledProcessError] | None = None,
+        skip_logging: bool = False,
+    ) -> "ConnectionCompletedProcess":
+        """
+        Execute command as another user.
+
+        This method dispatches to platform-specific implementations.
+
+        :param command: Command line to execute as target user.
+        :param user: Target account user name.
+        :param password: Target account password.
+        :param domain: Account domain name; use ``None`` or ``"."`` for local account.
+        :param cwd: Working directory for launched command.
+        :param timeout: Timeout in seconds for command execution.
+        :param env: Environment variables passed to helper process.
+        :param expected_return_codes: Return codes treated as successful.
+        :param shell: Reserved for API compatibility.
+        :param custom_exception: Exception class raised for unexpected return code.
+        :param skip_logging: Skip stdout/stderr logging for this execution.
+        :return: Completed process result for executed command.
+        :raises OsNotSupported: If current OS is not supported.
+        """
+        if self._os_type == OSType.WINDOWS:
+            return self._execute_command_as_user_windows(
+                command,
+                user=user,
+                password=password,
+                domain=domain,
+                cwd=cwd,
+                timeout=timeout,
+                env=env,
+                expected_return_codes=expected_return_codes,
+                shell=shell,
+                custom_exception=custom_exception,
+                skip_logging=skip_logging,
+            )
+        raise OsNotSupported(f"Run-as-user execution is not supported for OS type: {self._os_type}")
+
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        *,
+        expected_return_codes: Iterable | None = frozenset({0}),
+        custom_exception: Type[CalledProcessError] | None = None,
+        skip_logging: bool = False,
+    ) -> "ConnectionCompletedProcess":
+        """
+        Create a local system user.
+
+        This method dispatches to platform-specific implementations.
+
+        :param username: Local user name to create.
+        :param password: Initial password for the user.
+        :param expected_return_codes: Return codes considered successful.
+        :param custom_exception: Exception class raised on unexpected return code.
+        :param skip_logging: Skip stdout/stderr logging for this execution.
+        :return: Completed process result.
+        :raises OsNotSupported: If current OS is not supported.
+        """
+        return create_user_util(
+            connection=self,
+            username=username,
+            password=password,
+            expected_return_codes=expected_return_codes,
+            custom_exception=custom_exception,
+            skip_logging=skip_logging,
+        )
+
+    def delete_user(
+        self,
+        username: str,
+        *,
+        expected_return_codes: Iterable | None = frozenset({0}),
+        custom_exception: Type[CalledProcessError] | None = None,
+        skip_logging: bool = False,
+    ) -> "ConnectionCompletedProcess":
+        """
+        Delete a local system user.
+
+        This method dispatches to platform-specific implementations.
+
+        :param username: Local user name to delete.
+        :param expected_return_codes: Return codes considered successful.
+        :param custom_exception: Exception class raised on unexpected return code.
+        :param skip_logging: Skip stdout/stderr logging for this execution.
+        :return: Completed process result.
+        :raises OsNotSupported: If current OS is not supported.
+        """
+        return delete_user_util(
+            connection=self,
+            username=username,
+            expected_return_codes=expected_return_codes,
+            custom_exception=custom_exception,
+            skip_logging=skip_logging,
         )
 
     def execute_command(
@@ -889,6 +1251,12 @@ class RPyCConnection(PythonConnection):
                 raise ModuleFrameworkDesignError(f"Exception occurred while closing connection: {e}") from e
 
     def _set_process_class(self) -> None:
+        """
+        Select process wrapper class matching current remote operating system.
+
+        :return: ``None``
+        :raises OsNotSupported: If there is no matching process class.
+        """
         _os_name = self.get_os_name()
         for process_cls in self._process_classes:
             if process_cls._os_type == self._os_type:
@@ -902,6 +1270,11 @@ class RPyCConnection(PythonConnection):
             raise OsNotSupported("There is no RPyCProcess subclass for this type of OS.")
 
     def _set_bg_serving_thread(self) -> None:
+        """
+        Start background serving thread for RPyC callbacks, if enabled.
+
+        :return: ``None``
+        """
         if self._enable_bg_serving_thread:
             self._background_serving_thread = rpyc.BgServingThread(self.remote)
             time.sleep(0.1)

@@ -129,6 +129,10 @@ class RPyCDeploymentException(ModuleFrameworkDesignError):
     """Handle exceptions when deployment found issue."""
 
 
+class RunAsUserError(ModuleFrameworkDesignError):
+    """Raised when run-as-user execution setup is invalid."""
+
+
 class MissingPortablePythonOnServerException(RPyCDeploymentException):
     """Handle exceptions when not found portable python on server."""
 
