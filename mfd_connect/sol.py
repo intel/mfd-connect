@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: MIT
 """It's a Connection for Serial over LAN protocol."""
 
@@ -19,7 +19,15 @@ import pexpect.popen_spawn
 from mfd_typing.os_values import OSName, OSType, OSBitness
 from mfd_common_libs import add_logging_level, log_levels, log_func_info
 
+from mfd_connect.util import ansiterm
+
 from .util.decorators import conditional_cache
+from .util.console_utils import (
+    ANSITERM_COLS_SIZE,
+    ANSITERM_ROWS_SIZE,
+    BLUE_BACKGROUND_COLOR,
+    GREY_BACKGROUND_COLOR,
+)
 from .util.serial_utils import SerialKeyCode
 from .base import Connection, ConnectionCompletedProcess
 from .exceptions import SolException, ConnectionCalledProcessError, OsNotSupported
@@ -312,7 +320,7 @@ class SolConnection(Connection):
         if index_of_found_string != 0:
             if retry_count:
                 logger.log(level=log_levels.MODULE_DEBUG, msg="Fatal Error while establishing SoL session! Retrying...")
-                self._establish_connection(retry_count - 1)
+                return self._establish_connection(retry_count - 1)
             else:
                 raise SolException(f"SoL sessions activation failure: {sol_connection_process.before}")
         logger.log(level=log_levels.MODULE_DEBUG, msg="...Done!")
@@ -497,39 +505,89 @@ class SolConnection(Connection):
 
         :param legacy: enable flow for legacy bios mode
         :param output_to_parse - string from console, from handle.before
-        :return - string with pre-cleaning, lines separated by new line character
+        :return: string with pre-cleaning, lines separated by new line character
         """
+        term = ansiterm.Ansiterm(ANSITERM_ROWS_SIZE, ANSITERM_COLS_SIZE)
+        term.feed(output_to_parse)
+
+        # Windows Boot Manager often places selected entry marker at row end.
+        for row in range(ANSITERM_ROWS_SIZE):
+            row_tiles = term.get_tiles(row * ANSITERM_COLS_SIZE, row * ANSITERM_COLS_SIZE + ANSITERM_COLS_SIZE)
+            marker_index = next((idx for idx, tile in enumerate(row_tiles) if tile.glyph == ">"), -1)
+            if marker_index < int(ANSITERM_COLS_SIZE * 0.75):
+                continue
+            selected_line = "".join(tile.glyph for tile in row_tiles).replace(">", " ").strip()
+            if selected_line:
+                logger.log(level=log_levels.MODULE_DEBUG, msg=f"Selected option from marker: {selected_line}")
+                return selected_line
+
+        output_lines = []
+        selected_backgrounds = {BLUE_BACKGROUND_COLOR, GREY_BACKGROUND_COLOR}
+        for row in range(ANSITERM_ROWS_SIZE):
+            row_tiles = term.get_tiles(row * ANSITERM_COLS_SIZE, row * ANSITERM_COLS_SIZE + ANSITERM_COLS_SIZE)
+            selected_chars = []
+            started = False
+            for tile in row_tiles:
+                color = tile.color
+                is_selected = color.get("reverse") or color.get("bg") in selected_backgrounds
+                if is_selected and (tile.glyph != " " or started):
+                    started = True
+                    selected_chars.append(tile.glyph)
+                elif started:
+                    break
+
+            if not selected_chars:
+                continue
+
+            line = "".join(selected_chars).rstrip()
+            if not line:
+                continue
+            if legacy and "*" not in line and output_lines:
+                output_lines[-1] += " " + line
+            else:
+                output_lines.append(line)
+
+        if output_lines:
+            selected_output = "\n".join(output_lines)
+            logger.log(level=log_levels.MODULE_DEBUG, msg=f"Selected option from colors: {selected_output}")
+            return selected_output
+
+        logger.log(level=log_levels.MODULE_DEBUG, msg="Selected option not found via Ansiterm, trying regex fallback")
+        return SolConnection._parse_selection_regex_fallback(legacy, output_to_parse)
+
+    @staticmethod
+    def _parse_selection_regex_fallback(legacy: bool, output_to_parse: str) -> str:
+        """Fallback parser for selected option for compatibility with old SOL flows."""
         output_lines = []
         entries = ("".join(output_to_parse)).split("\x1b")
-        selected_pattern = r"\[44m(.+)"  # color of selected option, blue background
+
+        # color of selected option, blue background
+        selected_pattern = rf"\[{BLUE_BACKGROUND_COLOR}m(.+)"
         pattern = re.compile(selected_pattern)
         for elem in entries:
             matched_pattern = pattern.match(elem)
-            if matched_pattern:  # BootMenu
+            if matched_pattern:
                 line = matched_pattern.groups()[0]
                 if legacy:
-                    # Legacy
-                    if "*" not in line:
+                    if "*" not in line and output_lines:
                         output_lines[-1] += " " + line
                     else:
                         output_lines.append(line)
                 else:
-                    # EFI
                     output_lines.append(line)
 
         if output_lines:
             return "\n".join(output_lines)
 
-        logger.log(level=log_levels.MODULE_DEBUG, msg="Selected option not found, trying method for GRUB2")
-        selected_pattern = r"\[47m"  # color of selected option, grey background
+        # color of selected option, grey background
+        selected_pattern = rf"\[{GREY_BACKGROUND_COLOR}m"
         pattern = re.compile(selected_pattern)
         for i, elem in enumerate(entries):
             matched_pattern = pattern.match(elem)
-            if matched_pattern:
-                # next line could be selected option
-                if i + 1 < len(entries):
-                    if "*" in entries[i + 1]:
-                        output_lines.append(entries[i + 1])
+            if matched_pattern and i + 1 < len(entries):
+                if "*" in entries[i + 1]:
+                    output_lines.append(entries[i + 1])
+
         return "\n".join(output_lines)
 
     def _check_if_unix(self) -> bool:

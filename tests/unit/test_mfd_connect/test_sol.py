@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: MIT
 import sys
 from subprocess import CalledProcessError
@@ -11,6 +11,7 @@ from pytest import raises, fixture
 from mfd_connect import SolConnection
 from mfd_connect.base import ConnectionCompletedProcess
 from mfd_connect.exceptions import OsNotSupported, SolException
+from mfd_connect.util.serial_utils import SerialKeyCode
 
 
 class TestSolConnection:
@@ -91,6 +92,80 @@ class TestSolConnection:
             "cmd arg1 arg2", discard_stdout=True, expected_return_codes=[0], custom_exception=self.CustomTestException
         )
 
+    def test_clear_buffer_with_pending_output(self, sol, mocker):
+        sol._connection_handle = mocker.Mock(before=b"pending output")
+
+        sol._clear_buffer()
+
+        sol._connection_handle.expect.assert_called_once()
+
+    def test_wait_for_string_success(self, sol, mocker):
+        sol._connection_handle = mocker.Mock()
+        sol._connection_handle.expect.return_value = 0
+
+        assert sol.wait_for_string(["ready"], expect_timeout=True, timeout=1) == 0
+        sol._connection_handle.expect.assert_called_once()
+
+    def test_get_output_after_user_action(self, sol, mocker):
+        sol._connection_handle = mocker.Mock(before=b"raw console output")
+        sol.wait_for_string = mocker.Mock()
+        parse_output = mocker.patch.object(sol, "_parse_output", return_value="parsed output")
+
+        assert sol.get_output_after_user_action(selected_option=True) == "parsed output"
+        parse_output.assert_called_once_with("raw console output", True)
+
+    def test_send_key_sends_requested_times(self, sol, mocker):
+        sol._connection_handle = mocker.Mock()
+        sleep = mocker.patch("mfd_connect.sol.time.sleep")
+
+        sol.send_key(SerialKeyCode.enter, count=2, sleeptime=0)
+
+        assert sol._connection_handle.send.call_count == 2
+        sleep.assert_called()
+
+    def test_init_raises_on_windows(self, mocker):
+        mocker.patch("mfd_connect.sol.platform.system", return_value="Windows")
+
+        with pytest.raises(SolException, match="Windows is not supported as test controller, yet"):
+            SolConnection(username="admin", password="secret", ip="10.10.10.10")
+
+    def test_init_raises_when_ipmiutil_missing(self, mocker):
+        mocker.patch("mfd_connect.sol.platform.system", return_value="Linux")
+        mocker.patch("mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", side_effect=FileNotFoundError("ipmiutil"))
+
+        with pytest.raises(SolException):
+            SolConnection(username="admin", password="secret", ip="10.10.10.10")
+
+    def test_establish_connection_retries_once(self, sol, mocker):
+        first_child = mocker.Mock()
+        first_child.expect.return_value = 1
+        second_child = mocker.Mock()
+        second_child.expect.return_value = 0
+
+        sol._ipmi_tool_name = "ipmiutil"
+        sol._ipmi_parameters = "-F lan2 -U admin -P secret -N 10.10.10.10 -V 4"
+        mocker.patch.object(sol, "_deactivate_sol_session")
+        spawn = mocker.patch("mfd_connect.sol.pexpect.spawn", create=True, side_effect=[first_child, second_child])
+
+        result = sol._establish_connection(retry_count=1)
+
+        assert spawn.call_count == 2
+        assert result is second_child
+
+    def test__parse_selection_regex_fallback_blue_background(self):
+        output = "\x1b[44mSelected Boot Option"
+
+        selected = SolConnection._parse_selection_regex_fallback(False, output)
+
+        assert selected == "Selected Boot Option"
+
+    def test__parse_selection_regex_fallback_grey_background_legacy(self):
+        output = "\x1b[47m\x1b*Legacy Boot Option"
+
+        selected = SolConnection._parse_selection_regex_fallback(True, output)
+
+        assert selected == "*Legacy Boot Option"
+
     def test__parse_output(self, sol):
         output = (
             ", use '~.' to end, '~?' for help.]\r\r\n"
@@ -110,6 +185,35 @@ class TestSolConnection:
         BootUtil version 1.7.11.7"""
         )
         assert sol._parse_output(output) == expected_output
+
+    def test__parse_selection_windows_boot_manager(self, sol):
+        output = (
+            "\x1b[7;2H \x1b[7;6HWin2022_wRelease30.1.2RefDrv"
+            "\x1b[6;2H \x1b[0m\x1b[30;47m \x1b[6;6HWindows2022_Release30.2_Reference"
+            "\x1b[6;72H>\x1b[0m\x1b[37;40m"
+        )
+
+        selected = sol._parse_output(output, selection=True)
+
+        assert "Windows2022_Release30.2_Reference" in selected
+
+    def test__parse_selection_legacy_highlight(self, sol):
+        output = "\x1b[44m*Legacy Boot Option\x1b[0m"
+
+        selected = sol._parse_output(output, selection=True, legacy=True)
+
+        assert "*Legacy Boot Option" in selected
+
+    def test__parse_selection_preos_continue_normal_boot(self):
+        output_to_parse = (
+            "\x1b[09;01H\x1b[1m\x1b[37m\x1b[40m\x1b[09;01H  "
+            "\x1b[1m\x1b[37m\x1b[44mContinue Normal Boot"
+            "\x1b[10;01H\x1b[1m\x1b[37m\x1b[40m\x1b[10;01H  One-shot UEFI Boot Menu"
+        )
+
+        selected = SolConnection._parse_selection(False, output_to_parse)
+
+        assert selected == "Continue Normal Boot"
 
     def test__check_if_unix(self, sol, mocker):
         sol.execute_command = mocker.create_autospec(
