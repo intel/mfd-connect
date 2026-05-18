@@ -56,6 +56,13 @@ def run() -> None:
         from rpyc.utils.authenticators import SSLAuthenticator
 
         authenticator = SSLAuthenticator(keyfile=args.ssl_keyfile, certfile=args.ssl_certfile)
-    server = ThreadedServer(SlaveService, port=args.port, logger=logger, backlog=BACKLOG, authenticator=authenticator)
+    server = ThreadedServer(
+        SlaveService,
+        port=args.port,
+        ipv6=args.ipv6,
+        logger=logger,
+        backlog=BACKLOG,
+        authenticator=authenticator,
+    )
     logger.info("RPyC server initializing")
     server.start()
