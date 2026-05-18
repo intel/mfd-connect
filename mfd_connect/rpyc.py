@@ -69,6 +69,7 @@ class RPyCConnection(PythonConnection):
         cache_system_data: bool = True,
         ssl_keyfile: str | None = None,
         ssl_certfile: str | None = None,
+        ipv6: bool = False,
         **kwargs,
     ) -> None:  # noqa: D200
         """
@@ -93,6 +94,7 @@ class RPyCConnection(PythonConnection):
         :param cache_system_data: Flag to cache system data like self._os_type, OS name, OS bitness and CPU architecture
         :param ssl_keyfile: Path to SSL key file.
         :param ssl_certfile: Path to SSL certificate file.
+        :param ipv6: set to ``True`` when *ip* is an IPv6 address (default: ``False``)
         """
         super().__init__(ip, model, default_timeout, cache_system_data)
         self.path_extension = path_extension
@@ -109,6 +111,7 @@ class RPyCConnection(PythonConnection):
         self.share_password: str = share_password
         self._ssl_keyfile: str | None = ssl_keyfile
         self._ssl_certfile: str | None = ssl_certfile
+        self._ipv6: bool = ipv6
         self._establish_connection(retry_timeout=retry_timeout, retry_time=retry_time)
 
     def _establish_connection(self, *, retry_timeout: Optional[int], retry_time: int) -> None:
@@ -250,6 +253,7 @@ class RPyCConnection(PythonConnection):
             return rpyc.ssl_connect(
                 str(self._ip),
                 port=self._port,
+                ipv6=self._ipv6,
                 service=ClassicService,
                 keepalive=True,
                 config={"sync_request_timeout": self._connection_timeout},
@@ -259,6 +263,7 @@ class RPyCConnection(PythonConnection):
         return rpyc.connect(
             str(self._ip),
             port=self._port,
+            ipv6=self._ipv6,
             service=ClassicService,
             keepalive=True,
             config={"sync_request_timeout": self._connection_timeout},
