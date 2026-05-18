@@ -44,6 +44,7 @@ class TunneledRPyCConnection(RPyCConnection):
         model: "BaseModel | None" = None,
         cache_system_data: bool = True,
         ipv6: bool = False,
+        jump_host_ipv6: bool = False,
         **kwargs,
     ) -> None:
         """
@@ -60,7 +61,8 @@ class TunneledRPyCConnection(RPyCConnection):
         :param jump_host_retry_timeout: Time for try of connection, in secs
         :param jump_host_retry_time: Time between next try of connection, in secs
         :param enable_bg_serving_thread: Set to True if background serving thread must be activated, otherwise False
-        :param ipv6: set to ``True`` when *ip* is an IPv6 address (default: ``False``)
+        :param ipv6: set to ``True`` when *ip* (target) is an IPv6 address (default: ``False``)
+        :param jump_host_ipv6: set to ``True`` when *jump_host_ip* is an IPv6 address (default: ``False``)
         :param model: pydantic model of connection
         :param cache_system_data: Flag to cache system data like self._os_type, OS name, OS bitness and CPU architecture
         """
@@ -74,6 +76,7 @@ class TunneledRPyCConnection(RPyCConnection):
             enable_bg_serving_thread=enable_bg_serving_thread,
             model=model,
             cache_system_data=cache_system_data,
+            ipv6=jump_host_ipv6,
             **kwargs,
         )
         self._tunnel_connection = self._connection
