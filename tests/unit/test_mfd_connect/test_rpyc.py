@@ -37,6 +37,7 @@ class TestRPyCConnection:
             conn._connection_timeout = 360
             conn.path_extension = None
             conn.cache_system_data = True
+            conn._ipv6 = False
             return conn
 
     def test_wait_for_host(self, rpyc, mocker):
@@ -670,6 +671,7 @@ class TestRPyCConnection:
             conn._connection_timeout = 360
             conn.path_extension = None
             conn.cache_system_data = True
+            conn._ipv6 = False
             return conn
 
     def test_execute_with_timeout(self, rpyc_conn_with_timeout, rpyc, mocker):
@@ -807,6 +809,53 @@ class TestRPyCConnection:
         connect_mock.assert_called_once_with(
             str(rpyc._ip),
             port=rpyc._port,
+            service=ClassicService,
+            keepalive=True,
+            config={"sync_request_timeout": rpyc._connection_timeout},
+            keyfile=rpyc._ssl_keyfile,
+            certfile=rpyc._ssl_certfile,
+            ipv6=False,
+        )
+
+    def test__create_connection_with_ipv6(self, rpyc, mocker):
+        # Simulate successful connection with ipv6=True
+        mock_conn = mocker.Mock()
+        rpyc.modules = mocker.Mock()
+        connect_mock = mocker.patch("rpyc.connect", return_value=mock_conn)
+        rpyc._ip = "::1"
+        rpyc._port = 18812
+        rpyc._ssl_keyfile = None
+        rpyc._ssl_certfile = None
+        rpyc._connection_timeout = 10
+        rpyc._ipv6 = True
+        result = RPyCConnection._create_connection(rpyc)
+        assert result == mock_conn
+        connect_mock.assert_called_once_with(
+            str(rpyc._ip),
+            port=rpyc._port,
+            ipv6=True,
+            service=ClassicService,
+            keepalive=True,
+            config={"sync_request_timeout": rpyc._connection_timeout},
+        )
+
+    def test__create_connection_with_ssl_and_ipv6(self, rpyc, mocker):
+        # Simulate successful SSL connection with ipv6=True
+        mock_conn = mocker.Mock()
+        rpyc.modules = mocker.Mock()
+        connect_mock = mocker.patch("rpyc.ssl_connect", return_value=mock_conn)
+        rpyc._ip = "::1"
+        rpyc._port = 18812
+        rpyc._ssl_keyfile = "key.pem"
+        rpyc._ssl_certfile = "cert.pem"
+        rpyc._connection_timeout = 10
+        rpyc._ipv6 = True
+        result = RPyCConnection._create_connection(rpyc)
+        assert result == mock_conn
+        connect_mock.assert_called_once_with(
+            str(rpyc._ip),
+            port=rpyc._port,
+            ipv6=True,
             service=ClassicService,
             keepalive=True,
             config={"sync_request_timeout": rpyc._connection_timeout},
