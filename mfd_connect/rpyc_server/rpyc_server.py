@@ -34,6 +34,7 @@ def run() -> None:
         help="Port to bind to",
     )
     parser.add_argument("-l", "--log", type=str, default=None, help="Path to log file")
+    parser.add_argument("--ipv6", action="store_true", default=False, help="Listen on IPv6 (binds to '::')")
     parser.add_argument(
         "--ssl-keyfile",
         type=str,
