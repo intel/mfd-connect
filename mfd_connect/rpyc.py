@@ -40,6 +40,162 @@ add_logging_level(level_name="MODULE_DEBUG", level_value=log_levels.MODULE_DEBUG
 add_logging_level(level_name="CMD", level_value=log_levels.CMD)
 add_logging_level(level_name="OUT", level_value=log_levels.OUT)
 
+_CONPTY_HELPER_SCRIPT = r"""
+import ctypes
+import ctypes.wintypes
+import sys
+import threading
+import time
+
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+class SECURITY_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [
+        ("nLength", ctypes.wintypes.DWORD),
+        ("lpSecurityDescriptor", ctypes.c_void_p),
+        ("bInheritHandle", ctypes.wintypes.BOOL),
+    ]
+
+
+class STARTUPINFOW(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.wintypes.DWORD),
+        ("lpReserved", ctypes.wintypes.LPWSTR),
+        ("lpDesktop", ctypes.wintypes.LPWSTR),
+        ("lpTitle", ctypes.wintypes.LPWSTR),
+        ("dwX", ctypes.wintypes.DWORD),
+        ("dwY", ctypes.wintypes.DWORD),
+        ("dwXSize", ctypes.wintypes.DWORD),
+        ("dwYSize", ctypes.wintypes.DWORD),
+        ("dwXCountChars", ctypes.wintypes.DWORD),
+        ("dwYCountChars", ctypes.wintypes.DWORD),
+        ("dwFillAttribute", ctypes.wintypes.DWORD),
+        ("dwFlags", ctypes.wintypes.DWORD),
+        ("wShowWindow", ctypes.wintypes.WORD),
+        ("cbReserved2", ctypes.wintypes.WORD),
+        ("lpReserved2", ctypes.POINTER(ctypes.c_byte)),
+        ("hStdInput", ctypes.wintypes.HANDLE),
+        ("hStdOutput", ctypes.wintypes.HANDLE),
+        ("hStdError", ctypes.wintypes.HANDLE),
+    ]
+
+
+class STARTUPINFOEXW(ctypes.Structure):
+    _fields_ = [
+        ("StartupInfo", STARTUPINFOW),
+        ("lpAttributeList", ctypes.c_void_p),
+    ]
+
+
+class PROCESS_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("hProcess", ctypes.wintypes.HANDLE),
+        ("hThread", ctypes.wintypes.HANDLE),
+        ("dwProcessId", ctypes.wintypes.DWORD),
+        ("dwThreadId", ctypes.wintypes.DWORD),
+    ]
+
+
+EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+CREATE_UNICODE_ENVIRONMENT = 0x00000400
+PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
+
+
+def main():
+    if len(sys.argv) < 5:
+        sys.stderr.write("Usage: mfd_conpty_helper.py <command> <press_enter:0/1> <confirm> <timeout_s>\n")
+        sys.exit(2)
+
+    command = sys.argv[1]
+    press_enter = sys.argv[2] == "1"
+    confirm = sys.argv[3] if sys.argv[3] else None
+    timeout_ms = int(sys.argv[4]) * 1000
+
+    hIn_r = ctypes.wintypes.HANDLE()
+    hIn_w = ctypes.wintypes.HANDLE()
+    hOut_r = ctypes.wintypes.HANDLE()
+    hOut_w = ctypes.wintypes.HANDLE()
+
+    kernel32.CreatePipe(ctypes.byref(hIn_r), ctypes.byref(hIn_w), None, 0)
+    kernel32.CreatePipe(ctypes.byref(hOut_r), ctypes.byref(hOut_w), None, 0)
+
+    kernel32.CreatePseudoConsole.restype = ctypes.HRESULT
+    size = ctypes.wintypes.COORD(220, 9999)
+    hPC = ctypes.c_void_p()
+    hr = kernel32.CreatePseudoConsole(size, hIn_r, hOut_w, 0, ctypes.byref(hPC))
+    kernel32.CloseHandle(hIn_r)
+    kernel32.CloseHandle(hOut_w)
+
+    if hr != 0:
+        sys.stderr.write(f"CreatePseudoConsole failed hr=0x{hr & 0xFFFFFFFF:08X}\n")
+        sys.exit(1)
+
+    size_needed = ctypes.c_size_t(0)
+    kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size_needed))
+    attr_list_buf = ctypes.create_string_buffer(size_needed.value)
+    kernel32.InitializeProcThreadAttributeList(attr_list_buf, 1, 0, ctypes.byref(size_needed))
+    kernel32.UpdateProcThreadAttribute(
+        attr_list_buf, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+        hPC, ctypes.sizeof(ctypes.c_void_p), None, None,
+    )
+
+    siEx = STARTUPINFOEXW()
+    ctypes.memset(ctypes.byref(siEx), 0, ctypes.sizeof(siEx))
+    siEx.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
+    siEx.lpAttributeList = ctypes.cast(attr_list_buf, ctypes.c_void_p)
+
+    pi = PROCESS_INFORMATION()
+    ok = kernel32.CreateProcessW(
+        None, command, None, None, False,
+        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+        None, None,
+        ctypes.byref(siEx),
+        ctypes.byref(pi),
+    )
+
+    if not ok:
+        err = ctypes.get_last_error()
+        sys.stderr.write(f"CreateProcessW failed err={err}\n")
+        sys.exit(1)
+
+    stop_event = threading.Event()
+    confirm_sent = [False]
+
+    def feed_input():
+        time.sleep(2.0)
+        if confirm is not None and not confirm_sent[0]:
+            payload = (confirm + "\r\n").encode()
+            kernel32.WriteFile(hIn_w, payload, len(payload), None, None)
+            confirm_sent[0] = True
+            time.sleep(0.5)
+        if press_enter:
+            while not stop_event.is_set():
+                kernel32.WriteFile(hIn_w, b"\r\n", 2, None, None)
+                time.sleep(0.5)
+
+    t = threading.Thread(target=feed_input, daemon=True)
+    t.start()
+
+    kernel32.WaitForSingleObject(pi.hProcess, timeout_ms)
+    stop_event.set()
+
+    rc_val = ctypes.wintypes.DWORD(0)
+    kernel32.GetExitCodeProcess(pi.hProcess, ctypes.byref(rc_val))
+
+    kernel32.CloseHandle(pi.hProcess)
+    kernel32.CloseHandle(pi.hThread)
+    kernel32.CloseHandle(hIn_w)
+    kernel32.CloseHandle(hOut_r)
+    kernel32.ClosePseudoConsole(hPC)
+
+    sys.exit(rc_val.value)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
 
 class RPyCConnection(PythonConnection):
     """RPyC Connection class."""
@@ -477,6 +633,88 @@ class RPyCConnection(PythonConnection):
         errors = errors if errors else b""
         rc = int(proc.returncode)
         return CompletedProcess(args=command, stdout=output, stderr=errors, returncode=rc)
+
+    def interactive_custom_command(
+        self,
+        additional_parameters: str,
+        cwd: Optional[str] = None,
+        env: Optional[Dict] = None,
+        press_enter: bool = True,
+        confirm: Optional[str] = None,
+    ) -> "ConnectionCompletedProcess":
+        """
+        Execute an interactive command that requires user prompts.
+
+        Uses Windows ConPTY (CreatePseudoConsole) to handle commands that read
+        directly from the console (CONIN$), bypassing stdin redirection.
+
+        :param additional_parameters: Full command string to execute interactively
+        :param cwd: Current working directory for command execution
+        :param env: Environment variables for command execution
+        :param press_enter: Whether to automatically respond to "Press <Enter> to continue..." prompts
+        :param confirm: Character to send in response to a Y/N prompt (e.g. "y" or "n")
+        :return: ConnectionCompletedProcess with return_code and raw_output attributes
+        :raises NotImplementedError: if not running on Windows
+        """
+        if self._os_type != OSType.WINDOWS:
+            raise NotImplementedError(
+                f"interactive_custom_command is not implemented for {self.__class__.__name__} on {self._os_type}"
+            )
+        return self._interactive_custom_command_windows(additional_parameters, cwd, env, press_enter, confirm)
+
+    def _interactive_custom_command_windows(
+        self,
+        command: str,
+        cwd: Optional[str],
+        env: Optional[Dict],
+        press_enter: bool,
+        confirm: Optional[str],
+    ) -> "ConnectionCompletedProcess":
+        """Run interactive command on Windows via ConPTY (CreatePseudoConsole)."""
+        timeout_s = self.default_timeout or 60
+
+        remote_temp = self.modules().tempfile.gettempdir()
+        helper_path = self.modules().os.path.join(remote_temp, "mfd_conpty_helper.py")
+        self.modules().pathlib.Path(helper_path).write_text(_CONPTY_HELPER_SCRIPT, encoding="utf-8")
+
+        cmd = [
+            self.modules().sys.executable,
+            helper_path,
+            command,
+            "1" if press_enter else "0",
+            confirm or "",
+            str(timeout_s),
+        ]
+
+        logger.log(level=log_levels.CMD, msg=f"Interactive command >{self._ip}> '{command}', cwd: {cwd}")
+        completed_process = self.modules().subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdout=PIPE,
+            stderr=PIPE,
+            timeout=timeout_s + 15,
+            check=False,
+        )
+
+        stdout_decoded = (completed_process.stdout or b"").decode("utf-8", errors="backslashreplace")
+        stderr_decoded = (completed_process.stderr or b"").decode("utf-8", errors="backslashreplace")
+        return_code = int(completed_process.returncode)
+
+        logger.log(level=log_levels.OUT, msg=f"rc={return_code} stdout: {stdout_decoded}")
+        if stderr_decoded:
+            logger.log(level=log_levels.OUT, msg=f"stderr: {stderr_decoded}")
+
+        result = ConnectionCompletedProcess(
+            args=command,
+            stdout=stdout_decoded,
+            stderr=stderr_decoded,
+            stdout_bytes=completed_process.stdout or b"",
+            stderr_bytes=completed_process.stderr or b"",
+            return_code=return_code,
+        )
+        result.raw_output = stdout_decoded
+        return result
 
     def send_command_and_disconnect_platform(self, command: str) -> None:
         """
