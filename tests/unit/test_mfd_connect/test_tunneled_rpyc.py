@@ -17,9 +17,7 @@ class TestTunneledRPyCConnectionIPv6:
     @patch.object(TunneledRPyCConnection, "log_tunneled_host_info")
     @patch.object(TunneledRPyCConnection, "_set_process_class")
     @patch.object(RPyCConnection, "__init__", autospec=True, return_value=None)
-    def test_tunneled_rpyc_passes_ipv6_true(
-        self, mock_super_init, _mock_set_proc, _mock_log, _mock_bg
-    ):
+    def test_tunneled_rpyc_passes_ipv6_true(self, mock_super_init, _mock_set_proc, _mock_log, _mock_bg):
         """Test that ipv6=True is passed to rpyc.connect on the tunnel connection."""
         mock_tunnel_conn = MagicMock()
         mock_remote_rpyc_connect = mock_tunnel_conn.modules.rpyc.connect
@@ -51,9 +49,7 @@ class TestTunneledRPyCConnectionIPv6:
     @patch.object(TunneledRPyCConnection, "log_tunneled_host_info")
     @patch.object(TunneledRPyCConnection, "_set_process_class")
     @patch.object(RPyCConnection, "__init__", autospec=True, return_value=None)
-    def test_tunneled_rpyc_passes_ipv6_false_by_default(
-        self, mock_super_init, _mock_set_proc, _mock_log, _mock_bg
-    ):
+    def test_tunneled_rpyc_passes_ipv6_false_by_default(self, mock_super_init, _mock_set_proc, _mock_log, _mock_bg):
         """Test that ipv6=False is passed by default."""
         mock_tunnel_conn = MagicMock()
         mock_remote_rpyc_connect = mock_tunnel_conn.modules.rpyc.connect
