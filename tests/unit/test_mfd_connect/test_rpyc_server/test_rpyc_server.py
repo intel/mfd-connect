@@ -45,4 +45,3 @@ def test_run_with_ipv6(mock_argparse, mock_threaded_server):
     mock_threaded_server.assert_called_once()
     call_kwargs = mock_threaded_server.call_args[1]
     assert call_kwargs["ipv6"] is True
-
