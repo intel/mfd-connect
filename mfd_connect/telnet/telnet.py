@@ -114,7 +114,12 @@ class TelnetConnection(Connection):
 
     def _get_shell_prompt_patterns(self) -> List[bytes]:
         """Return prompt patterns covering both plain and ANSI-colored shell prompts."""
-        return [self._prompt.encode(), ANSI_SHELL_PROMPT_FALLBACK_REGEX]
+        # In PreOS environment we don't expect ANSI sequences in prompt, so we return only provided prompt pattern.
+        return (
+            [self._prompt.encode(), ANSI_SHELL_PROMPT_FALLBACK_REGEX]
+            if not self._in_pre_os()
+            else [self._prompt.encode()]
+        )
 
     @staticmethod
     def _strip_ansi_sequences(text: str) -> str:
