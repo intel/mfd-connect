@@ -121,8 +121,7 @@ Methods supported:
   The execute_command method in SSHConnection includes a feature that attempts to reconnect to the session in case of failure. If the connection drops during command execution, the method will:
 
   1. Attempt to reconnect to the SSH session.
-  2. Execute a test command (```hostname```) to verify the connection.
-  3. Retry executing the original command, number of retries and timeout can be set in the method with parameters:
+  2. Retry executing the original command, number of retries and timeout can be set in the method with parameters:
       1. `reconnect_attempts: int = 5` - Number of retries to attempt.
       2. `attempt_delay: int = 6` - delay in seconds between retries.
 

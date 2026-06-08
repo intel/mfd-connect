@@ -605,84 +605,30 @@ class TestSSHConnection:
         ssh.send_command_and_disconnect_platform.assert_called_with("sudo shutdown -h now")
 
     def test_handle_execution_reconnect_success(self, ssh, mocker):
-        time.sleep = mocker.Mock(return_value=None)
+        sleep_mock = mocker.patch("mfd_connect.ssh.time.sleep")
         ssh._reconnect = mocker.Mock()
-        ssh._exec_command = mocker.Mock(return_value=(None, None, None, 0))
-        ssh.handle_execution_reconnect("test_command")
+        ssh.handle_execution_reconnect()
         ssh._reconnect.assert_called_once()
-        ssh._exec_command.assert_called_once_with(
-            "hostname",
-            input_data=None,
-            cwd=None,
-            timeout=None,
-            environment=None,
-            stderr_to_stdout=False,
-            discard_stdout=False,
-            discard_stderr=False,
-            get_pty=False,
-        )
+        sleep_mock.assert_not_called()
 
     def test_handle_execution_reconnect_fail_success(self, ssh, mocker):
-        time.sleep = mocker.Mock(return_value=None)
+        sleep_mock = mocker.patch("mfd_connect.ssh.time.sleep")
         ssh._reconnect = mocker.Mock(side_effect=[SSHReconnectException, None])
-        ssh._exec_command = mocker.Mock(return_value=(None, None, None, 0))
-        ssh.handle_execution_reconnect("test_command")
-        ssh._exec_command.assert_called_once_with(
-            "hostname",
-            input_data=None,
-            cwd=None,
-            timeout=None,
-            environment=None,
-            stderr_to_stdout=False,
-            discard_stdout=False,
-            discard_stderr=False,
-            get_pty=False,
-        )
+        ssh.handle_execution_reconnect()
         assert ssh._reconnect.call_count == 2
-        assert ssh._exec_command.call_count == 1
+        sleep_mock.assert_called_once_with(6)
 
-    def test_handle_execution_reconnect_success_test_cmd_fail_success(self, ssh, mocker):
-        time.sleep = mocker.Mock(return_value=None)
+    def test_handle_execution_reconnect_fail_raises_after_all_attempts(self, ssh, mocker):
+        sleep_mock = mocker.patch("mfd_connect.ssh.time.sleep")
         ssh._reconnect = mocker.Mock()
-        ssh._exec_command = mocker.Mock(side_effect=[SSHReconnectException, (None, None, None, 0)])
-        ssh.handle_execution_reconnect("test_command")
-        ssh._exec_command.assert_any_call(
-            "hostname",
-            input_data=None,
-            cwd=None,
-            timeout=None,
-            environment=None,
-            stderr_to_stdout=False,
-            discard_stdout=False,
-            discard_stderr=False,
-            get_pty=False,
-        )
+        ssh._reconnect.side_effect = [SSHReconnectException, SSHReconnectException]
+
+        with pytest.raises(SSHReconnectException):
+            ssh.handle_execution_reconnect(reconnect_attempts=2, attempt_delay=1)
+
         assert ssh._reconnect.call_count == 2
-        assert ssh._exec_command.call_count == 2
-
-    def test_handle_execution_reconnect_success_test_cmd_fail(self, ssh, mocker):
-        time.sleep = mocker.Mock(return_value=None)
-        ssh._reconnect = mocker.Mock()
-        ssh._exec_command = mocker.Mock(
-            side_effect=[SSHReconnectException, SSHReconnectException, SSHReconnectException, SSHReconnectException]
-        )
-
-        with pytest.raises(ConnectionCalledProcessError):
-            ssh.handle_execution_reconnect("test_command", reconnect_attempts=2)
-
-        ssh._exec_command.assert_any_call(
-            "hostname",
-            input_data=None,
-            cwd=None,
-            timeout=None,
-            environment=None,
-            stderr_to_stdout=False,
-            discard_stdout=False,
-            discard_stderr=False,
-            get_pty=False,
-        )
-        assert ssh._reconnect.call_count == 2
-        assert ssh._exec_command.call_count == 2
+        assert sleep_mock.call_count == 2
+        sleep_mock.assert_called_with(1)
 
     def test_download_file_from_url_windows_ssh_no_supported(self, ssh, mocker):
         ssh.get_os_name = mocker.Mock(return_value=OSName.WINDOWS)
