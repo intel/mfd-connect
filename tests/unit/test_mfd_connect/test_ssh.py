@@ -362,6 +362,36 @@ class TestSSHConnection:
         )
         assert result.return_code == 0
 
+    def test_execute_command_with_reconnect_fail_raises_connection_called_process_error(self, ssh, mocker):
+        ssh._verify_command_correctness = mocker.Mock()
+        ssh._adjust_command = mocker.Mock(return_value="test_command")
+        ssh._exec_command = mocker.Mock(side_effect=EOFError)
+        ssh.handle_execution_reconnect = mocker.Mock(side_effect=SSHReconnectException("Reconnect exhausted"))
+
+        with pytest.raises(ConnectionCalledProcessError) as exc_info:
+            ssh.execute_command("test_command")
+
+        assert exc_info.value.returncode == -1
+        assert exc_info.value.cmd == "test_command"
+        assert exc_info.value.output == ""
+        assert "Reconnect exhausted" in str(exc_info.value.stderr)
+        assert isinstance(exc_info.value.__cause__, SSHReconnectException)
+
+    def test_execute_command_with_reconnect_fail_raises_custom_exception(self, ssh, mocker):
+        ssh._verify_command_correctness = mocker.Mock()
+        ssh._adjust_command = mocker.Mock(return_value="test_command")
+        ssh._exec_command = mocker.Mock(side_effect=EOFError)
+        ssh.handle_execution_reconnect = mocker.Mock(side_effect=SSHReconnectException("Reconnect exhausted"))
+
+        with pytest.raises(self.CustomTestException) as exc_info:
+            ssh.execute_command("test_command", custom_exception=self.CustomTestException)
+
+        assert exc_info.value.returncode == -1
+        assert exc_info.value.cmd == "test_command"
+        assert exc_info.value.output == ""
+        assert "Reconnect exhausted" in str(exc_info.value.stderr)
+        assert isinstance(exc_info.value.__cause__, SSHReconnectException)
+
     def test_execute_command_skip_logging_provided(self, ssh, mocker, caplog):
         caplog.set_level(0)
         channel = mocker.create_autospec(ChannelFile)
@@ -605,84 +635,65 @@ class TestSSHConnection:
         ssh.send_command_and_disconnect_platform.assert_called_with("sudo shutdown -h now")
 
     def test_handle_execution_reconnect_success(self, ssh, mocker):
-        time.sleep = mocker.Mock(return_value=None)
+        sleep_mock = mocker.patch("mfd_connect.ssh.time.sleep")
         ssh._reconnect = mocker.Mock()
-        ssh._exec_command = mocker.Mock(return_value=(None, None, None, 0))
-        ssh.handle_execution_reconnect("test_command")
+        ssh.handle_execution_reconnect()
         ssh._reconnect.assert_called_once()
-        ssh._exec_command.assert_called_once_with(
-            "hostname",
-            input_data=None,
-            cwd=None,
-            timeout=None,
-            environment=None,
-            stderr_to_stdout=False,
-            discard_stdout=False,
-            discard_stderr=False,
-            get_pty=False,
-        )
+        sleep_mock.assert_not_called()
 
     def test_handle_execution_reconnect_fail_success(self, ssh, mocker):
-        time.sleep = mocker.Mock(return_value=None)
-        ssh._reconnect = mocker.Mock(side_effect=[SSHReconnectException, None])
-        ssh._exec_command = mocker.Mock(return_value=(None, None, None, 0))
-        ssh.handle_execution_reconnect("test_command")
-        ssh._exec_command.assert_called_once_with(
-            "hostname",
-            input_data=None,
-            cwd=None,
-            timeout=None,
-            environment=None,
-            stderr_to_stdout=False,
-            discard_stdout=False,
-            discard_stderr=False,
-            get_pty=False,
-        )
+        sleep_mock = mocker.patch("mfd_connect.ssh.time.sleep")
+        ssh._reconnect = mocker.Mock(side_effect=[SSHReconnectException("Initial reconnect error"), None])
+        ssh.handle_execution_reconnect()
         assert ssh._reconnect.call_count == 2
-        assert ssh._exec_command.call_count == 1
+        sleep_mock.assert_called_once_with(6)
 
-    def test_handle_execution_reconnect_success_test_cmd_fail_success(self, ssh, mocker):
-        time.sleep = mocker.Mock(return_value=None)
+    def test_handle_execution_reconnect_fail_raises_after_all_attempts(self, ssh, mocker):
+        sleep_mock = mocker.patch("mfd_connect.ssh.time.sleep")
+        original_error = SSHReconnectException("Original reconnect error")
         ssh._reconnect = mocker.Mock()
-        ssh._exec_command = mocker.Mock(side_effect=[SSHReconnectException, (None, None, None, 0)])
-        ssh.handle_execution_reconnect("test_command")
-        ssh._exec_command.assert_any_call(
-            "hostname",
-            input_data=None,
-            cwd=None,
-            timeout=None,
-            environment=None,
-            stderr_to_stdout=False,
-            discard_stdout=False,
-            discard_stderr=False,
-            get_pty=False,
-        )
-        assert ssh._reconnect.call_count == 2
-        assert ssh._exec_command.call_count == 2
+        ssh._reconnect.side_effect = [original_error, SSHReconnectException("Second reconnect error")]
 
-    def test_handle_execution_reconnect_success_test_cmd_fail(self, ssh, mocker):
-        time.sleep = mocker.Mock(return_value=None)
+        with pytest.raises(SSHReconnectException) as exc_info:
+            ssh.handle_execution_reconnect(reconnect_attempts=2, attempt_delay=1)
+
+        assert ssh._reconnect.call_count == 2
+        assert sleep_mock.call_count == 1
+        sleep_mock.assert_called_once_with(1)
+        assert "2 attempts" in str(exc_info.value)
+        assert exc_info.value.__cause__ is original_error
+
+    def test_handle_execution_reconnect_catches_ssh_exception(self, ssh, mocker):
+        """Test that SSHException from _reconnect() is caught and retried."""
+        sleep_mock = mocker.patch("mfd_connect.ssh.time.sleep")
+        original_error = paramiko.SSHException("SSH connection failed")
         ssh._reconnect = mocker.Mock()
-        ssh._exec_command = mocker.Mock(
-            side_effect=[SSHReconnectException, SSHReconnectException, SSHReconnectException, SSHReconnectException]
-        )
+        ssh._reconnect.side_effect = [original_error, SSHReconnectException("Still failed")]
 
-        with pytest.raises(ConnectionCalledProcessError):
-            ssh.handle_execution_reconnect("test_command", reconnect_attempts=2)
+        with pytest.raises(SSHReconnectException) as exc_info:
+            ssh.handle_execution_reconnect(reconnect_attempts=2, attempt_delay=1)
 
-        ssh._exec_command.assert_any_call(
-            "hostname",
-            input_data=None,
-            cwd=None,
-            timeout=None,
-            environment=None,
-            stderr_to_stdout=False,
-            discard_stdout=False,
-            discard_stderr=False,
-            get_pty=False,
-        )
         assert ssh._reconnect.call_count == 2
-        assert ssh._exec_command.call_count == 2
+        assert sleep_mock.call_count == 1
+        assert "2 attempts" in str(exc_info.value)
+        assert exc_info.value.__cause__ is original_error
+
+    @pytest.mark.parametrize("reconnect_attempts", [0, -1])
+    def test_handle_execution_reconnect_invalid_reconnect_attempts(self, ssh, reconnect_attempts):
+        ssh._reconnect = Mock()
+
+        with pytest.raises(ValueError, match="reconnect_attempts must be greater than 0"):
+            ssh.handle_execution_reconnect(reconnect_attempts=reconnect_attempts)
+
+        ssh._reconnect.assert_not_called()
+
+    def test_handle_execution_reconnect_invalid_attempt_delay(self, ssh):
+        ssh._reconnect = Mock()
+
+        with pytest.raises(ValueError, match="attempt_delay must be greater than or equal to 0"):
+            ssh.handle_execution_reconnect(reconnect_attempts=1, attempt_delay=-1)
+
+        ssh._reconnect.assert_not_called()
 
     def test_download_file_from_url_windows_ssh_no_supported(self, ssh, mocker):
         ssh.get_os_name = mocker.Mock(return_value=OSName.WINDOWS)
