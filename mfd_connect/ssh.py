@@ -421,83 +421,44 @@ class SSHConnection(AsyncConnection):
                 f"Timeout of {timeout} seconds expired during execution of '{command}' command"
             )
 
-    def handle_execution_reconnect(
-        self,
-        command: str,
-        *,
-        input_data: str | None = None,
-        cwd: str | None = None,
-        timeout: int | None = None,
-        env: dict | None = None,
-        stderr_to_stdout: bool = False,
-        discard_stdout: bool = False,
-        discard_stderr: bool = False,
-        custom_exception: Type[CalledProcessError] | None = None,
-        reconnect_attempts: int = 5,
-        attempt_delay: int = 6,
-    ) -> None:
+    def handle_execution_reconnect(self, reconnect_attempts: int = 5, attempt_delay: int = 6) -> None:
         """
-        Try to reconnect to and make attempts to execute test command.
+        Try to reconnect to host.
 
-        :param command: Command to execute, with all necessary arguments
-        :param input_data: Data to pass to program on the standard input
-        :param cwd: Directory to start program execution in
-        :param timeout: Program execution timeout, in seconds
-        :param env: Environment to execute the program in
-        :param stderr_to_stdout: Redirect stderr to stdout, ignored if discard_stderr is set to True
-        :param discard_stdout: Don't capture stdout stream
-        :param discard_stderr: Don't capture stderr stream
-        :param custom_exception: Enable us to raise our exception if program exits with an unexpected return code.
         :param reconnect_attempts: Number of attempts to reconnect to the host if connection is lost.
         :param attempt_delay: Delay between reconnection attempts.
-        custom_exception must inherit from CalledProcessError to use its fields like returncode, cmd, output, stderr
 
-        :raises TimeoutExpired: if program doesn't conclude before timeout is reached
-        :raises ValueError: if command has invalid characters inside
-        :raises ConnectionCalledProcessError: if program exits with an unexpected return code
+        :return: None
+        :raises ValueError: If reconnect_attempts is not positive or attempt_delay is negative.
+        :raises SSHReconnectException: If reconnection attempts are exhausted without success.
         """
+        if reconnect_attempts <= 0:
+            raise ValueError("reconnect_attempts must be greater than 0")
+        if attempt_delay < 0:
+            raise ValueError("attempt_delay must be greater than or equal to 0")
+
+        last_error = None
+        initial_attempts = reconnect_attempts
         while reconnect_attempts > 0:
             reconnect_success = False
             try:
                 self._reconnect()
                 reconnect_success = True
-            except SSHReconnectException as rec_err:
+            except (SSHException, SSHReconnectException) as rec_err:
                 logger.log(level=log_levels.MODULE_DEBUG, msg=f"Connection drop while trying to reconnect: {rec_err}")
+                if last_error is None:
+                    last_error = rec_err
 
-            if not reconnect_success:
+            if reconnect_success:
+                return
+
+            reconnect_attempts -= 1
+            if reconnect_attempts > 0:
                 time.sleep(attempt_delay)
-                reconnect_attempts -= 1
-                continue
-
-            try:
-                _stdin_pipe, _stdout_pipe, _stderr_pipe, rc = self._exec_command(
-                    "hostname",
-                    input_data=input_data,
-                    environment=env,
-                    cwd=cwd,
-                    timeout=timeout,
-                    stderr_to_stdout=stderr_to_stdout,
-                    discard_stdout=discard_stdout,
-                    discard_stderr=discard_stderr,
-                    get_pty=False,
-                )
-                if rc == 0:
-                    logger.log(level=log_levels.MODULE_DEBUG, msg="Successfully executed test command after reconnect")
-                    return
-            except Exception as e:
-                reconnect_attempts -= 1
-                logger.log(
-                    level=log_levels.MODULE_DEBUG,
-                    msg=f"Connection drop after reconnect when executing test command: {e}",
-                )
         else:
-            logger.log(
-                level=log_levels.MODULE_DEBUG,
-                msg=f"Unable to execute command '{command}' after multiple attempts to reconnect",
-            )
-            if custom_exception:
-                raise custom_exception(returncode=-1, cmd=command, output="", stderr="")
-            raise ConnectionCalledProcessError(returncode=-1, cmd=command, output="", stderr="")
+            raise SSHReconnectException(
+                f"Failed to reconnect to host after {initial_attempts} attempts."
+            ) from last_error
 
     def execute_command(
         self,
@@ -592,19 +553,22 @@ class SSHConnection(AsyncConnection):
             )
 
         if not success_execution:
-            self.handle_execution_reconnect(
-                command,
-                input_data=input_data,
-                cwd=cwd,
-                timeout=timeout,
-                env=env,
-                stderr_to_stdout=stderr_to_stdout,
-                discard_stdout=discard_stdout,
-                discard_stderr=discard_stderr,
-                custom_exception=custom_exception,
-                reconnect_attempts=reconnect_attempts,
-                attempt_delay=attempt_delay,
-            )
+            try:
+                self.handle_execution_reconnect(reconnect_attempts=reconnect_attempts, attempt_delay=attempt_delay)
+            except SSHReconnectException as reconnect_err:
+                if custom_exception:
+                    raise custom_exception(
+                        returncode=-1,
+                        cmd=command,
+                        output="",
+                        stderr=str(reconnect_err),
+                    ) from reconnect_err
+                raise ConnectionCalledProcessError(
+                    returncode=-1,
+                    cmd=command,
+                    output="",
+                    stderr=str(reconnect_err),
+                ) from reconnect_err
 
             logger.log(level=log_levels.CMD, msg=f"Executing >{self._ip}> '{command}' after reconnect, cwd: {cwd}")
             stdin_pipe, stdout_pipe, stderr_pipe, returncode = self._exec_command(
