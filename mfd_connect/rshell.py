@@ -246,7 +246,7 @@ class RShellConnection(Connection):
         """Check if EFI shell is the client OS."""
         efi_shell_check_command = "ver"
         output = self.execute_command(
-            efi_shell_check_command, shell=False, expected_return_codes=None, timeout=5
+            efi_shell_check_command, shell=False, expected_return_codes=None, timeout=10
         ).stdout
         return any(out in output for out in ["UEFI Shell", "UEFI Interactive Shell"])
 
