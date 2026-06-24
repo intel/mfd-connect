@@ -889,7 +889,7 @@ class SSHTunnelForwarder(object):
         if host_pkey_directories is None:
             host_pkey_directories = [DEFAULT_SSH_DIRECTORY]
 
-        paramiko_key_types = {"rsa": paramiko.RSAKey, "dsa": paramiko.DSSKey, "ecdsa": paramiko.ECDSAKey}
+        paramiko_key_types = {"rsa": paramiko.RSAKey, "ecdsa": paramiko.ECDSAKey}
         if hasattr(paramiko, "Ed25519Key"):
             paramiko_key_types["ed25519"] = paramiko.Ed25519Key
         for directory in host_pkey_directories:
@@ -1107,16 +1107,16 @@ class SSHTunnelForwarder(object):
         """
         Get SSH Public key from a private key file, given an optional password.
 
-        :param pkey_file: The path to the private key file. File containing a private key (RSA, DSS or ECDSA)
+        :param pkey_file: The path to the private key file. File containing a private key (RSA, ECDSA or Ed25519)
         :param pkey_password: The password to decrypt the private key.
         :param key_type: The type of the key to read (e.g., paramiko.RSAKey).
-            If None, it will try to read the key as RSA, DSS, ECDSA, and Ed25519
+            If None, it will try to read the key as RSA, ECDSA, and Ed25519
             in that order.
         :param logger: Optional logger to log debug messages.
         :return: An instance of paramiko.PKey or None if the key could not be loaded.
         """
         ssh_pkey = None
-        key_types = (paramiko.RSAKey, paramiko.DSSKey, paramiko.ECDSAKey)
+        key_types = (paramiko.RSAKey, paramiko.ECDSAKey)
         if hasattr(paramiko, "Ed25519Key"):
             key_types += (paramiko.Ed25519Key,)
         for pkey_class in (key_type,) if key_type else key_types:
@@ -1596,7 +1596,7 @@ def _parse_arguments(args: list[str] = None) -> argparse.Namespace:
         dest="ssh_private_key",
         metavar="KEY_FILE",
         type=str,
-        help="RSA/DSS/ECDSA private key file",
+        help="RSA/ECDSA/Ed25519 private key file",
     )
 
     parser.add_argument(
@@ -1605,7 +1605,7 @@ def _parse_arguments(args: list[str] = None) -> argparse.Namespace:
         dest="ssh_private_key_password",
         metavar="KEY_PASSWORD",
         type=str,
-        help="RSA/DSS/ECDSA private key password",
+        help="RSA/ECDSA/Ed25519 private key password",
     )
 
     parser.add_argument("-t", "--threaded", action="store_true", help="Allow concurrent connections to each tunnel")
