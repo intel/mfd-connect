@@ -68,7 +68,7 @@ class SSHConnection(AsyncConnection):
         *args,
         port: int = 22,
         username: str,
-        password: Optional[str],
+        password: str | None = None,
         key_path: "list[str | Path] | str | Path | None" = None,
         skip_key_verification: bool = False,
         model: "BaseModel | None" = None,

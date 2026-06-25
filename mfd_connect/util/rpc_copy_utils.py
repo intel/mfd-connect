@@ -28,7 +28,7 @@ import logging
 import time
 from functools import partial
 from ipaddress import IPv4Address
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Union, Optional
 
 from mfd_common_libs import log_levels, DisableLogger
@@ -865,6 +865,26 @@ def _ssh_copy_locally(
     :param src_conn: Source connection object
     :param target: Path to where file should be copied.
     """
+
+    def _normalize_scp_path(path: Path) -> str:
+        path_str = str(path)
+        # PureWindowsPath gives stable slash normalization across Linux/Windows runners.
+        if "\\" in path_str or ":" in path_str:
+            return PureWindowsPath(path_str).as_posix()
+        return path_str
+
+    def _scp_key_args(conn: "SSHConnection | TunneledSSHConnection") -> str:
+        key_filename = conn._connection_details.get("key_filename")
+        if isinstance(key_filename, list):
+            key_filename = key_filename[0] if key_filename else None
+        if key_filename is None:
+            return ""
+        return rf' -i "{key_filename}"'
+
+    SCP_ARGS = " -o BatchMode=yes -o StrictHostKeyChecking=no -r"
+    source_scp = _normalize_scp_path(source)
+    target_scp = _normalize_scp_path(target)
+
     if src_conn._os_type == OSType.POSIX and isinstance(dst_conn, dst_connections):
         user = dst_conn._connection_details.get("username")
         password = dst_conn._connection_details.get("password")
@@ -872,8 +892,14 @@ def _ssh_copy_locally(
         shell = False if src_conn.get_os_name() == OSName.FREEBSD else True
         add_known_host(ip=dst_conn.ip, port=22, connection=src_conn, shell=shell)
 
-        target = target.as_posix() if dst_conn._os_type == OSType.WINDOWS else target
-        command = rf'sshpass -p "{password}" scp -o StrictHostKeyChecking=no -r {source} {user}@{dst_conn.ip}:{target}'
+        if password is None:
+            key_args = _scp_key_args(dst_conn)
+            command = rf"scp{key_args}{SCP_ARGS} {source_scp} {user}@{dst_conn.ip}:{target_scp}"
+        else:
+            command = (
+                rf'sshpass -p "{password}" scp -o StrictHostKeyChecking=no -r {source_scp} '
+                rf"{user}@{dst_conn.ip}:{target_scp}"
+            )
         src_conn.execute_command(command=command, cwd="/", shell=shell)
 
         _remove_ip_from_known_host(src_conn, dst_conn.ip)
@@ -884,8 +910,14 @@ def _ssh_copy_locally(
         shell = False if src_conn.get_os_name() == OSName.FREEBSD else True
         add_known_host(ip=src_conn.ip, port=22, connection=dst_conn, shell=shell)
 
-        source = source.as_posix() if dst_conn._os_type != OSType.WINDOWS else source
-        command = rf'sshpass -p "{password}" scp -o StrictHostKeyChecking=no -r {user}@{src_conn.ip}:{source} {target}'
+        if password is None:
+            key_args = _scp_key_args(src_conn)
+            command = rf"scp{key_args}{SCP_ARGS} {user}@{src_conn.ip}:{source_scp} {target_scp}"
+        else:
+            command = (
+                rf'sshpass -p "{password}" scp -o StrictHostKeyChecking=no -r '
+                rf"{user}@{src_conn.ip}:{source_scp} {target_scp}"
+            )
         dst_conn.execute_command(command=command, cwd="/", shell=shell)
 
         _remove_ip_from_known_host(dst_conn, src_conn.ip)
@@ -893,15 +925,24 @@ def _ssh_copy_locally(
     elif src_conn._os_type == OSType.WINDOWS and isinstance(dst_conn, dst_connections):
         user = dst_conn._connection_details.get("username")
         password = dst_conn._connection_details.get("password")
-        source = source.as_posix() if src_conn._os_type == OSType.WINDOWS else source
-        command = rf"echo y | pscp -r -scp -pw {password} {source} {user}@{dst_conn.ip}:{target}"
+
+        if password is None:
+            key_args = _scp_key_args(dst_conn)
+            command = rf"scp{key_args}{SCP_ARGS} {source_scp} {user}@{dst_conn.ip}:{target_scp}"
+        else:
+            source_pscp = source.as_posix() if src_conn._os_type == OSType.WINDOWS else source
+            command = rf"echo y | pscp -r -scp -pw {password} {source_pscp} {user}@{dst_conn.ip}:{target}"
         src_conn.execute_command(command=command, shell=True)
 
     elif dst_conn._os_type == OSType.WINDOWS and isinstance(src_conn, dst_connections):
         user = src_conn._connection_details.get("username")
         password = src_conn._connection_details.get("password")
-        target = target.as_posix() if dst_conn._os_type == OSType.WINDOWS else target
-        command = rf"echo y | pscp -r -scp -pw {password} {user}@{src_conn.ip}:{source} {target}"
+        if password is None:
+            key_args = _scp_key_args(src_conn)
+            command = rf"scp{key_args}{SCP_ARGS} {user}@{src_conn.ip}:{source_scp} {target_scp}"
+        else:
+            target_pscp = target.as_posix() if dst_conn._os_type == OSType.WINDOWS else target
+            command = rf"echo y | pscp -r -scp -pw {password} {user}@{src_conn.ip}:{source} {target_pscp}"
         dst_conn.execute_command(command=command, shell=True)
 
 

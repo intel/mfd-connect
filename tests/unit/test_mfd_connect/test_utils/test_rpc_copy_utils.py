@@ -413,6 +413,147 @@ class TestRPCCopyUtils:
         ]
         src_conn.execute_command.assert_has_calls(calls)
 
+    def test_copy_remote_ssh_posix_without_password(self, mocker):
+        src_conn = dst_conn = mocker.create_autospec(SSHConnection)
+        src_conn._os_type = dst_conn._os_type = OSType.POSIX
+        dst_conn._connection_details = {"username": "user", "password": None}
+        dst_conn._ip = "10.10.10.20"
+        dst_conn.ip = dst_conn._ip
+        source = "/root/test"
+        target = "/root/copied_test"
+
+        _copy_remote_ssh(src_conn=src_conn, dst_conn=dst_conn, source=source, target=target)
+        src_conn._os_type = dst_conn._os_type = OSType.POSIX
+        src_conn.get_os_type.return_value = OSType.POSIX
+        dst_conn._connection_details = {"username": "user", "password": None}
+        dst_conn._ip = "10.10.10.20"
+        dst_conn.ip = dst_conn._ip
+        source = "/root/test"
+        target = "/root/copied_test"
+
+        _copy_remote_ssh(src_conn=src_conn, dst_conn=dst_conn, source=source, target=target)
+
+        calls = [
+            call(command="ping -n 1 10.10.10.20", shell=True),
+            call(r"ssh-keyscan -p 22 10.10.10.20 >> ~/.ssh/known_hosts", cwd="/", shell=True),
+            call(
+                r"scp -o BatchMode=yes -o StrictHostKeyChecking=no -r /root/test user@10.10.10.20:/root/copied_test",
+                cwd="/",
+                shell=True,
+            ),
+            call("sed -i '/10.10.10.20/d' ~/.ssh/known_hosts", shell=True),
+        ]
+        src_conn.execute_command.assert_has_calls(calls)
+
+    def test_copy_remote_ssh_posix_dst_local_without_password(self, mocker):
+        src_conn = mocker.create_autospec(SSHConnection)
+        dst_conn = mocker.create_autospec(LocalConnection)
+        mocker.patch("mfd_connect.util.rpc_copy_utils._check_if_ip_is_reachable", return_value=True)
+        src_conn._os_type = OSType.POSIX
+        dst_conn._os_type = OSType.POSIX
+        src_conn._connection_details = {"username": "user", "password": None}
+        src_conn._ip = "10.10.10.20"
+        src_conn.ip = src_conn._ip
+        source = PurePath("/root/test_dir")
+        target = PurePath("/tmp/copied_test_dir")
+
+        _copy_remote_ssh(src_conn=src_conn, dst_conn=dst_conn, source=source, target=target)
+
+        dst_conn.execute_command.assert_has_calls(
+            [
+                call(command=r"ssh-keyscan -p 22 10.10.10.20 >> ~/.ssh/known_hosts", cwd="/", shell=True),
+                call(
+                    command=r"scp -o BatchMode=yes -o StrictHostKeyChecking=no -r user@10.10.10.20:/root/test_dir"
+                    r" /tmp/copied_test_dir",
+                    cwd="/",
+                    shell=True,
+                ),
+                call("sed -i '/10.10.10.20/d' ~/.ssh/known_hosts", shell=True),
+            ]
+        )
+
+    def test_copy_remote_ssh_posix_dst_local_with_password(self, mocker):
+        src_conn = mocker.create_autospec(SSHConnection)
+        dst_conn = mocker.create_autospec(LocalConnection)
+        mocker.patch("mfd_connect.util.rpc_copy_utils._check_if_ip_is_reachable", return_value=True)
+        src_conn._os_type = OSType.POSIX
+        src_conn.get_os_name.return_value = OSName.LINUX
+        dst_conn._os_type = OSType.POSIX
+        src_conn._connection_details = {"username": "user", "password": "pass"}
+        src_conn._ip = "10.10.10.20"
+        src_conn.ip = src_conn._ip
+        source = PurePath("/root/test_dir")
+        target = PurePath("/tmp/copied_test_dir")
+
+        _copy_remote_ssh(src_conn=src_conn, dst_conn=dst_conn, source=source, target=target)
+
+        dst_conn.execute_command.assert_has_calls(
+            [
+                call(command=r"ssh-keyscan -p 22 10.10.10.20 >> ~/.ssh/known_hosts", cwd="/", shell=True),
+                call(
+                    command=r'sshpass -p "pass" scp -o StrictHostKeyChecking=no -r user@10.10.10.20:/root/test_dir '
+                    r"/tmp/copied_test_dir",
+                    cwd="/",
+                    shell=True,
+                ),
+                call("sed -i '/10.10.10.20/d' ~/.ssh/known_hosts", shell=True),
+            ]
+        )
+
+    def test_copy_remote_ssh_windows_src_to_posix_with_key_without_password(self, mocker):
+        src_conn = mocker.create_autospec(LocalConnection)
+        dst_conn = mocker.create_autospec(SSHConnection)
+        mocker.patch("mfd_connect.util.rpc_copy_utils._check_if_ip_is_reachable", return_value=True)
+        src_conn._os_type = OSType.WINDOWS
+        dst_conn._os_type = OSType.POSIX
+        dst_conn._connection_details = {
+            "username": "user",
+            "password": None,
+            "key_filename": r"C:\\Users\\agorczew\\.ssh\\id_rsa",
+        }
+        dst_conn._ip = "10.10.10.20"
+        dst_conn.ip = dst_conn._ip
+        source = PurePath(r"C:\test_dir")
+        target = PurePath("/root/copied_test_dir")
+
+        _copy_remote_ssh(src_conn=src_conn, dst_conn=dst_conn, source=source, target=target)
+
+        src_conn.execute_command.assert_called_once()
+        assert src_conn.execute_command.call_args.kwargs["shell"] is True
+        command = src_conn.execute_command.call_args.kwargs["command"]
+        assert r'scp -i "C:\\Users\\agorczew\\.ssh\\id_rsa"' in command
+        assert "-o BatchMode=yes" in command
+        assert "-o StrictHostKeyChecking=no" in command
+        assert "C:/test_dir" in command
+        assert r"user@10.10.10.20:/root/copied_test_dir" in command
+
+    def test_copy_remote_ssh_windows_src_to_posix_with_key_list_without_password(self, mocker):
+        src_conn = mocker.create_autospec(LocalConnection)
+        dst_conn = mocker.create_autospec(SSHConnection)
+        mocker.patch("mfd_connect.util.rpc_copy_utils._check_if_ip_is_reachable", return_value=True)
+        src_conn._os_type = OSType.WINDOWS
+        dst_conn._os_type = OSType.POSIX
+        dst_conn._connection_details = {
+            "username": "user",
+            "password": None,
+            "key_filename": [r"C:\\Users\\agorczew\\.ssh\\id_ed25519", r"C:\\Users\\agorczew\\.ssh\\id_rsa"],
+        }
+        dst_conn._ip = "10.10.10.20"
+        dst_conn.ip = dst_conn._ip
+        source = PurePath(r"C:\test_dir")
+        target = PurePath("/root/copied_test_dir")
+
+        _copy_remote_ssh(src_conn=src_conn, dst_conn=dst_conn, source=source, target=target)
+
+        src_conn.execute_command.assert_called_once()
+        assert src_conn.execute_command.call_args.kwargs["shell"] is True
+        command = src_conn.execute_command.call_args.kwargs["command"]
+        assert r'scp -i "C:\\Users\\agorczew\\.ssh\\id_ed25519"' in command
+        assert "-o BatchMode=yes" in command
+        assert "-o StrictHostKeyChecking=no" in command
+        assert "C:/test_dir" in command
+        assert r"user@10.10.10.20:/root/copied_test_dir" in command
+
     def test_source_not_exist(self, mocker):
         ssh_conn = mocker.create_autospec(SSHConnection)
         source = Path(r"C:\test_dir")
