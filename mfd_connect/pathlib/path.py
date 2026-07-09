@@ -9,7 +9,7 @@ import typing
 from pathlib import PurePath, PurePosixPath, PureWindowsPath
 from typing import Union, Optional, Sequence
 
-from mfd_common_libs import add_logging_level, log_levels
+from mfd_common_libs import DisableLogger, add_logging_level, log_levels
 from mfd_typing.os_values import OSType, OSName
 
 from mfd_connect.exceptions import NotAFileError, ModuleFrameworkDesignError
@@ -347,11 +347,17 @@ class CustomPosixPath(CustomPath, PurePosixPath):
     """Class for Posix Path."""
 
     def exists(self) -> bool:  # noqa:D102
-        outcome = self._owner.execute_command(f"ls {self}", expected_return_codes=None)
-        output = outcome.stderr if outcome._stderr is not None else outcome.stdout
-        if "permission denied".casefold() in output.casefold():
-            raise ModuleFrameworkDesignError(f"Error occurred for CustomPosixPath.exists():\n{output}")
-        return outcome.return_code == 0
+        # level= when DisableLogger has that constuructor
+        import inspect
+
+        has_level = "level" in inspect.signature(DisableLogger.__init__).parameters
+        params = {"level": log_levels.OUT} if has_level else {}
+        with DisableLogger(**params):  # it will hide logging output from executed command line
+            outcome = self._owner.execute_command(f"ls {self}", expected_return_codes=None)
+            output = outcome.stderr if outcome._stderr is not None else outcome.stdout
+            if "permission denied".casefold() in output.casefold():
+                raise ModuleFrameworkDesignError(f"Error occurred for CustomPosixPath.exists():\n{output}")
+            return outcome.return_code == 0
 
     def expanduser(self) -> CustomPath:  # noqa:D102
         homedir = self._owner.execute_command(
