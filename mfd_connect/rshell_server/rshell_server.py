@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: MIT
 """
 RShell Server Script.
@@ -172,6 +172,11 @@ def post_result() -> Response:
     return Response("Results received", status=200)
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Run the Flask REST server."""
     print("Starting Flask REST server...")
     app.run(host="0.0.0.0", port=80)
+
+
+if __name__ == "__main__":
+    run()
