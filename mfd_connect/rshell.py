@@ -105,8 +105,17 @@ class RShellConnection(Connection):
     def _run_server(self) -> RemoteProcess:
         """Run RShell server locally."""
         conn = LocalConnection()
-        server_file = conn.path(__file__).parent / "rshell_server.py"
-        return conn.start_process(f"{conn.modules().sys.executable} {server_file}")
+        conn.enable_sudo()
+        process = conn.start_process(f"{conn.modules().sys.executable} -m mfd_connect.rshell_server")
+        conn.disable_sudo()
+        timeout = TimeoutCounter(1)
+        while not timeout:
+            if not process.running:
+                raise RuntimeError(
+                    f"RShell server failed to start. Exit code: {process.return_code}\n"
+                    f"STDOUT: {process.stdout_text}\nSTDERR: {process.stderr_text}"
+                )
+        return process
 
     def execute_command(
         self,
@@ -246,7 +255,7 @@ class RShellConnection(Connection):
         """Check if EFI shell is the client OS."""
         efi_shell_check_command = "ver"
         output = self.execute_command(
-            efi_shell_check_command, shell=False, expected_return_codes=None, timeout=10
+            efi_shell_check_command, shell=False, expected_return_codes=None, timeout=20
         ).stdout
         return any(out in output for out in ["UEFI Shell", "UEFI Interactive Shell"])
 
