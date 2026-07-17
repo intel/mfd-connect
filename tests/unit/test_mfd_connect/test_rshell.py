@@ -407,10 +407,16 @@ class TestRShellConnection:
         rshell.server_process = None
         rshell.stop_server()
 
+        local_connection = mocker.patch("mfd_connect.rshell.LocalConnection").return_value
+        kill_process_by_pid = mocker.patch("mfd_connect.rshell.kill_process_by_pid")
         server_process = mocker.Mock()
+        server_process.pid = 1234
+        server_process.running = False
         server_process.stdout_text = "server out"
         rshell.server_process = server_process
 
         rshell.stop_server()
 
-        server_process.kill.assert_called_once()
+        local_connection.enable_sudo.assert_called_once()
+        kill_process_by_pid.assert_called_once_with(local_connection, 1234)
+        local_connection.disable_sudo.assert_called_once()

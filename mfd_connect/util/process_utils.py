@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 add_logging_level(level_name="MODULE_DEBUG", level_value=log_levels.MODULE_DEBUG)
 
-linux_kill_signal = "SIGINT"
+linux_kill_signal = "SIGTERM"
 
 
 def get_process_by_name(conn: "Connection", process_name: str) -> List[str]:
@@ -56,6 +56,26 @@ def kill_process_by_name(conn: "Connection", process_name: str) -> None:
         return _kill_process_by_name_freebsd(conn=conn, process_name=process_name)
     if os_name == OSName.ESXI:
         return _kill_process_by_name_esxi(conn=conn, process_name=process_name)
+    raise NotImplementedError(f"Not Implemented for {os_name} OS")
+
+
+def kill_process_by_pid(conn: "Connection", pid: int) -> None:
+    """
+    Kill process with given PID.
+
+    :param conn: Connection object
+    :param pid: process ID to kill
+    :raises NotImplementedError when connection obj is of OS other than LINUX, WINDOWS, FREEBSD, ESXI
+    """
+    os_name = conn.get_os_name()
+    if os_name == OSName.LINUX:
+        return _kill_process_by_pid_linux(conn=conn, pid=pid)
+    if os_name == OSName.WINDOWS:
+        return _kill_process_by_pid_windows(conn=conn, pid=pid)
+    if os_name == OSName.FREEBSD:
+        return _kill_process_by_pid_freebsd(conn=conn, pid=pid)
+    if os_name == OSName.ESXI:
+        return _kill_process_by_pid_esxi(conn=conn, pid=pid)
     raise NotImplementedError(f"Not Implemented for {os_name} OS")
 
 
@@ -100,6 +120,16 @@ def _kill_process_by_name_esxi(conn: "Connection", process_name: str) -> None:
         conn.execute_command(command, shell=True)
 
 
+def _kill_process_by_pid_esxi(conn: "Connection", pid: int) -> None:
+    """
+    Kill process with given PID.
+
+    :param conn: Connection object
+    :param pid: process ID to kill
+    """
+    conn.execute_command(f"kill {pid}", shell=True)
+
+
 def _get_process_by_name_freebsd(conn: "Connection", process_name: str) -> List[str]:
     """
     Get Process ids of running processes with given name.
@@ -126,6 +156,16 @@ def _kill_process_by_name_freebsd(conn: "Connection", process_name: str) -> None
     for pid in _get_process_by_name_freebsd(conn=conn, process_name=process_name):
         command = f"kill {pid}"
         conn.execute_command(command)
+
+
+def _kill_process_by_pid_freebsd(conn: "Connection", pid: int) -> None:
+    """
+    Kill process with given PID.
+
+    :param conn: Connection object
+    :param pid: process ID to kill
+    """
+    conn.execute_command(f"kill {pid}")
 
 
 def _get_process_by_name_linux(conn: "Connection", process_name: str) -> List[str]:
@@ -157,6 +197,21 @@ def _kill_process_by_name_linux(conn: "Connection", process_name: str) -> None:
         return
     elif res.return_code == 1:
         raise ProcessNotRunning(f"Process {process_name} not running!")
+
+
+def _kill_process_by_pid_linux(conn: "Connection", pid: int) -> None:
+    """
+    Kill process with given PID.
+
+    :param conn: Connection object
+    :param pid: process ID to kill
+    :raises ProcessNotRunning when the process not running
+    """
+    res = conn.execute_command(f"kill -{linux_kill_signal} {pid}", expected_return_codes={0, 1}, shell=True)
+    if res.return_code == 0:
+        return
+    elif res.return_code == 1:
+        raise ProcessNotRunning(f"Process {pid} not running!")
 
 
 def _get_process_by_name_windows(conn: "Connection", process_name: str) -> List[str]:
@@ -195,6 +250,27 @@ def _kill_process_by_name_windows(conn: "Connection", process_name: str) -> None
                 )
             else:
                 raise Exception(f"Error occurred while killing the process, {out.stderr}")
+
+
+def _kill_process_by_pid_windows(conn: "Connection", pid: int) -> None:
+    """
+    Kill process with given PID.
+
+    :param conn: Connection object
+    :param pid: process ID to kill
+    """
+    out = conn.execute_powershell(
+        f"taskkill /f /t /pid {pid}",
+        expected_return_codes={0, 1},
+    )
+    if out.return_code == 1:
+        if "not found" in out.stderr:
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg=out.stderr,
+            )
+        else:
+            raise Exception(f"Error occurred while killing the process, {out.stderr}")
 
 
 def _kill_all_processes_by_name_windows(conn: "Connection", process_name: str) -> None:

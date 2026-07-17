@@ -3,6 +3,7 @@
 """RShell Connection Class."""
 
 import logging
+from socket import timeout
 import sys
 import time
 import typing
@@ -18,7 +19,9 @@ from mfd_connect.exceptions import ConnectionCalledProcessError, OsNotSupported
 from mfd_connect.local import LocalConnection
 from mfd_connect.pathlib.path import CustomPath, custom_path_factory
 from mfd_connect.process.base import RemoteProcess
+from mfd_connect.process.local.base import LocalProcess
 from mfd_connect.util.decorators import conditional_cache
+from mfd_connect.util.process_utils import kill_process_by_pid
 
 from .base import Connection, ConnectionCompletedProcess
 
@@ -106,7 +109,7 @@ class RShellConnection(Connection):
         """Run RShell server locally."""
         conn = LocalConnection()
         conn.enable_sudo()
-        process = conn.start_process(f"{conn.modules().sys.executable} -m mfd_connect.rshell_server")
+        process: LocalProcess = conn.start_process(f"{conn.modules().sys.executable} -m mfd_connect.rshell_server")
         conn.disable_sudo()
         timeout = TimeoutCounter(1)
         while not timeout:
@@ -325,6 +328,23 @@ class RShellConnection(Connection):
         """Stop the RShell server."""
         if self.server_process:
             logger.log(level=log_levels.MODULE_DEBUG, msg="Stopping RShell server")
-            self.server_process.kill()
+            conn = LocalConnection()
+            conn.enable_sudo()
+            kill_process_by_pid(conn, self.server_process.pid)
+            timeout = TimeoutCounter(10)
+            conn.disable_sudo()
+            while not timeout:
+                if not self.server_process.running:
+                    break
+                time.sleep(1)
+            else:
+                logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server did not stop within timeout")
+                raise RuntimeError("RShell server did not stop within timeout")
+
             logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server stopped")
-            logger.log(level=log_levels.MODULE_DEBUG, msg=self.server_process.stdout_text)
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg=self.server_process.stdout_text
+                if self.server_process.stdout_text
+                else "RShell server had no stdout",
+            )
