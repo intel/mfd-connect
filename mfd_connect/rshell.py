@@ -3,7 +3,6 @@
 """RShell Connection Class."""
 
 import logging
-from socket import timeout
 import sys
 import time
 import typing
@@ -18,7 +17,6 @@ from mfd_typing.os_values import OSBitness, OSName, OSType
 from mfd_connect.exceptions import ConnectionCalledProcessError, OsNotSupported
 from mfd_connect.local import LocalConnection
 from mfd_connect.pathlib.path import CustomPath, custom_path_factory
-from mfd_connect.process.base import RemoteProcess
 from mfd_connect.process.local.base import LocalProcess
 from mfd_connect.util.decorators import conditional_cache
 from mfd_connect.util.process_utils import kill_process_by_pid
@@ -64,7 +62,7 @@ class RShellConnection(Connection):
         super().__init__(model=model, cache_system_data=cache_system_data)
         self._ip = ip
         self.server_ip = server_ip
-        self.server_process = None
+        self.server_process: LocalProcess | None = None
         if server_ip == "127.0.0.1":
             # start Rshell server
             self.server_process = self._run_server()
@@ -105,7 +103,7 @@ class RShellConnection(Connection):
         if stop_server and self.server_process:
             self.stop_server()
 
-    def _run_server(self) -> RemoteProcess:
+    def _run_server(self) -> LocalProcess:
         """Run RShell server locally."""
         conn = LocalConnection()
         conn.enable_sudo()
