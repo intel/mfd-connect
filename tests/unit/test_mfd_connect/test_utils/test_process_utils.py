@@ -18,6 +18,7 @@ from mfd_typing.os_values import OSName
 from mfd_connect.util.process_utils import (
     get_process_by_name,
     kill_process_by_name,
+    kill_process_by_pid,
     kill_all_processes_by_name,
     stop_process_by_name,
 )
@@ -75,13 +76,25 @@ class TestProcessUtils:
         ]
         kill_process_by_name(conn=ssh_linux, process_name="tcpdump")
         ssh_linux.execute_command.assert_called_once_with(
-            "pkill tcpdump --signal SIGINT", expected_return_codes={0, 1}, shell=True
+            "pkill tcpdump --signal SIGTERM", expected_return_codes={0, 1}, shell=True
         )
 
     def test_kill_process_by_name_using_kill_linux(self, ssh_linux):
         ssh_linux.execute_command.return_value = ConnectionCompletedProcess(args="", stdout="", return_code=1)
         with pytest.raises(ProcessNotRunning, match="Process tcpdump not running!"):
             kill_process_by_name(conn=ssh_linux, process_name="tcpdump")
+
+    def test_kill_process_by_pid_linux(self, ssh_linux):
+        ssh_linux.execute_command.return_value = ConnectionCompletedProcess(args="", stdout="", return_code=0)
+        kill_process_by_pid(conn=ssh_linux, pid=1234)
+        ssh_linux.execute_command.assert_called_once_with(
+            "kill -SIGTERM 1234", expected_return_codes={0, 1}, shell=True
+        )
+
+    def test_kill_process_by_pid_not_running_error_linux(self, ssh_linux):
+        ssh_linux.execute_command.return_value = ConnectionCompletedProcess(args="", stdout="", return_code=1)
+        with pytest.raises(ProcessNotRunning, match="Process 1234 not running!"):
+            kill_process_by_pid(conn=ssh_linux, pid=1234)
 
     def test_get_process_by_name_windows(self, ssh_windows):
         get_process_out = dedent(
@@ -138,6 +151,11 @@ class TestProcessUtils:
             ]
         )
 
+    def test_kill_process_by_pid_windows(self, ssh_windows):
+        ssh_windows.execute_powershell.return_value = ConnectionCompletedProcess(args="", stdout="", return_code=0)
+        kill_process_by_pid(conn=ssh_windows, pid=1234)
+        ssh_windows.execute_powershell.assert_called_once_with("taskkill /f /t /pid 1234", expected_return_codes={0, 1})
+
     def test_kill_all_processes_by_name_windows(self, ssh_windows):
         ssh_windows.execute_powershell.return_value = ConnectionCompletedProcess(args="", stdout="", return_code=0)
         kill_all_processes_by_name(conn=ssh_windows, process_name="explorer.exe")
@@ -179,6 +197,10 @@ class TestProcessUtils:
             ]
         )
 
+    def test_kill_process_by_pid_esxi(self, ssh_esxi):
+        kill_process_by_pid(conn=ssh_esxi, pid=1234)
+        ssh_esxi.execute_command.assert_called_once_with("kill 1234", shell=True)
+
     def test_get_process_by_name_freebsd(self, ssh_freebsd):
         ps_output = dedent(
             """\
@@ -217,9 +239,17 @@ class TestProcessUtils:
             ]
         )
 
+    def test_kill_process_by_pid_freebsd(self, ssh_freebsd):
+        kill_process_by_pid(conn=ssh_freebsd, pid=1234)
+        ssh_freebsd.execute_command.assert_called_once_with("kill 1234")
+
     def test_get_process_by_name_process_efi(self, ssh_efishell, mocker):
         with pytest.raises(NotImplementedError, match=f"Not Implemented for {ssh_efishell.get_os_name()} OS"):
             get_process_by_name(conn=ssh_efishell, process_name="tcpdump")
+
+    def test_kill_process_by_pid_process_efi(self, ssh_efishell):
+        with pytest.raises(NotImplementedError, match=f"Not Implemented for {ssh_efishell.get_os_name()} OS"):
+            kill_process_by_pid(conn=ssh_efishell, pid=1234)
 
     def test_stop_process_not_running(self, mocker, ssh_linux, caplog):
         caplog.set_level(log_levels.MODULE_DEBUG)
