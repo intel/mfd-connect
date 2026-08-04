@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: MIT
 """Module for RPyCProcess implementation for POSIX-compliant OS'es."""
 
@@ -31,5 +31,6 @@ class PosixRPyCProcess(RPyCProcess):
 
             if wait is not None:
                 self.wait(timeout=wait)
+                self._stop_pipe_drain()
         else:
             raise RemoteProcessInvalidState("Process has already finished")

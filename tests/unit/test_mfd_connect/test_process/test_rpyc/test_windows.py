@@ -45,6 +45,30 @@ class TestWindowsRPyCProcess:
         rpyc_process._start_pipe_drain.assert_called_with()
         rpyc_process._get_and_kill_process.assert_called_once()
 
+    def test_stop_with_wait(self, rpyc_process, mocker):
+        rpyc_process._start_pipe_drain = mocker.create_autospec(rpyc_process._start_pipe_drain)
+        rpyc_process._stop_pipe_drain = mocker.create_autospec(rpyc_process._stop_pipe_drain)
+        rpyc_process._get_and_kill_process = mocker.create_autospec(rpyc_process._get_and_kill_process)
+        rpyc_process.wait = mocker.create_autospec(rpyc_process.wait)
+        rpyc_process.stop(wait=10)
+        rpyc_process._get_and_kill_process.assert_called_once_with(
+            with_signal=rpyc_process._owner.modules().signal.CTRL_C_EVENT
+        )
+        rpyc_process.wait.assert_called_once_with(timeout=10)
+        rpyc_process._stop_pipe_drain.assert_called_once_with()
+
+    def test_kill_unsupported_signal_changes_to_sigterm(self, rpyc_process, mocker):
+        super_kill = mocker.patch("mfd_connect.process.rpyc.windows.RPyCProcess.kill", autospec=True)
+        rpyc_process.kill(wait=None, with_signal="SIGKILL")
+        super_kill.assert_called_once_with(
+            rpyc_process, wait=None, with_signal=rpyc_process._owner.modules().signal.SIGTERM
+        )
+
+    def test_kill_supported_signal(self, rpyc_process, mocker):
+        super_kill = mocker.patch("mfd_connect.process.rpyc.windows.RPyCProcess.kill", autospec=True)
+        rpyc_process.kill(wait=None, with_signal="CTRL_C_EVENT")
+        super_kill.assert_called_once_with(rpyc_process, wait=None, with_signal="CTRL_C_EVENT")
+
     def test_stop_already_finished_process_exception(self, rpyc_process):
         rpyc_process.running = False
 

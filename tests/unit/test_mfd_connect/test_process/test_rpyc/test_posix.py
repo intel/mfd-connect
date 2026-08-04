@@ -46,6 +46,16 @@ class TestPosixRPyCProcess:
         rpyc_process._start_pipe_drain.assert_called_with()
         rpyc_process._get_and_kill_process.assert_called_once_with(with_signal=SIGINT)
 
+    def test_stop_with_wait(self, rpyc_process, mocker):
+        rpyc_process._start_pipe_drain = mocker.create_autospec(rpyc_process._start_pipe_drain)
+        rpyc_process._stop_pipe_drain = mocker.create_autospec(rpyc_process._stop_pipe_drain)
+        rpyc_process._get_and_kill_process = mocker.create_autospec(rpyc_process._get_and_kill_process)
+        rpyc_process.wait = mocker.create_autospec(rpyc_process.wait)
+        rpyc_process.stop(wait=10)
+        rpyc_process._get_and_kill_process.assert_called_once_with(with_signal=SIGINT)
+        rpyc_process.wait.assert_called_once_with(timeout=10)
+        rpyc_process._stop_pipe_drain.assert_called_once_with()
+
     def test_stop_already_finished_process_exception(self, rpyc_process):
         rpyc_process.running = False
 
