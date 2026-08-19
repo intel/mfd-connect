@@ -5,9 +5,18 @@ RShell Client Script.
 
 Make sure that the Python UEFI interpreter is compiled with
 Socket module support.
+
+Usage::
+
+    rshell_client.py <server_ip> [source_ip] [source_port]
+
+The client polls the server for work, runs one command at a time and posts the result back.
+Commands are executed with a blocking ``os.system()`` call, so a tool that waits for input on
+the DUT stops the whole loop - every later command then times out on the server side. Keep
+that in mind when adding tools: always run them in a non interactive/batch mode.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 try:
     import httplib as client
@@ -23,6 +32,16 @@ if len(sys.argv) > 2:
     source_address = sys.argv[2]
 else:
     source_address = None
+# Local port the outgoing connection is bound to. Only relevant together with source_address,
+# which exists so that the server sees the expected client IP. Override it when the fixed
+# port collides with sockets left in TIME_WAIT by previous connections.
+if len(sys.argv) > 3:
+    source_port = int(sys.argv[3])
+else:
+    source_port = 80
+
+# How long to wait before retrying after a failed server interaction.
+RETRY_WAIT_SECONDS = 5
 
 os_name = os.name
 
@@ -39,6 +58,16 @@ def _sleep(interval):  # noqa: ANN001, ANN202
 
 
 time.sleep = _sleep
+
+
+def _close(connection):  # noqa: ANN001, ANN202
+    """Close a connection without letting a broken socket kill the client."""
+    if connection is None:
+        return
+    try:
+        connection.close()
+    except Exception as exp:  # noqa: BLE001
+        print("Ignoring error while closing the connection:", exp)
 
 
 def _get_command():  # noqa: ANN202
@@ -61,27 +90,37 @@ def _get_command():  # noqa: ANN202
 
 while True:
     # Connect to server
-    source_address_parameter = (source_address, 80) if source_address else None
-    conn = client.HTTPConnection(http_server, source_address=source_address_parameter)
-    # get the command from server
-    _command = _get_command()
+    source_address_parameter = (source_address, source_port) if source_address else None
+    conn = None
+    try:
+        conn = client.HTTPConnection(http_server, source_address=source_address_parameter)
+        # get the command from server
+        _command = _get_command()
+    except Exception as exp:  # noqa: BLE001
+        # A transient network error must not end the client. If it did, the DUT would stop
+        # asking for work and every following command would time out on the server.
+        print("Failed to get a command from the server:", exp)
+        _close(conn)
+        time.sleep(RETRY_WAIT_SECONDS)
+        continue
+
     if not _command:
-        conn.close()
-        time.sleep(5)
+        _close(conn)
+        time.sleep(RETRY_WAIT_SECONDS)
         continue
     cmd_str, _id = _command
     cmd_str = cmd_str.decode("utf-8")
     cmd_name = cmd_str.split(" ")[0]
     if cmd_name == "end":
         print("No more commands available to run")
-        conn.close()
+        _close(conn)
         exit(0)
 
     print("Executing", cmd_str)
     if cmd_name.startswith("reset"):
         print("Reset command received, shutting down the platform")
         os.system(cmd_str)  # execute reset command on machine
-        conn.close()
+        _close(conn)
         exit(0)
 
     non_echo = False
@@ -120,15 +159,19 @@ while True:
         if non_echo and f:
             f.close()
             os.system("del " + out)
-    except Exception as exp:
-        conn.request(
-            "POST",
-            "exception",
-            body=cmd + str(exp),
-            headers={"Content-Type": "text/plain", "Connection": "keep-alive", "CommandID": _id},
-        )
+    except Exception as exp:  # noqa: BLE001
+        try:
+            conn.request(
+                "POST",
+                "exception",
+                body=cmd + str(exp),
+                headers={"Content-Type": "text/plain", "Connection": "keep-alive", "CommandID": _id},
+            )
+        except Exception as report_exp:  # noqa: BLE001
+            # Reporting failed too - stay alive so the next poll can still reach the server.
+            print("Failed to report the error to the server:", report_exp)
 
     print("output posted to server")
-    conn.close()
+    _close(conn)
     print("closed the connection")
     time.sleep(1)
