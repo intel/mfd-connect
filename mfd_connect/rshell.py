@@ -39,6 +39,12 @@ add_logging_level(level_name="OUT", level_value=log_levels.OUT)
 # can be adjusted based on requirements and observed behavior of platforms.
 PLATFORM_POWER_TRANSITION_DELAY_SECONDS = 10
 
+# Timeout applied by the RShell server when the caller does not provide one.
+# Kept in sync with rshell_server.execute_command so the fallback can be logged explicitly.
+SERVER_DEFAULT_TIMEOUT_SECONDS = 600
+# Header carrying the server side explanation of a 504.
+TIMEOUT_REASON_HEADER = "X-RShell-Timeout-Reason"
+
 
 class RShellConnection(Connection):
     """RShell Connection Class."""
@@ -50,6 +56,7 @@ class RShellConnection(Connection):
         model: "BaseModel | None" = None,
         cache_system_data: bool = True,
         connection_timeout: int = 60,
+        default_timeout: int | None = None,
     ):
         """
         Initialize RShellConnection.
@@ -58,8 +65,12 @@ class RShellConnection(Connection):
         :param server_ip: The IP address of the server to connect to (optional).
         :param model: The Pydantic model to use for the connection (optional).
         :param cache_system_data: Whether to cache system data (default: True).
+        :param connection_timeout: Time to wait for the RShell client to show up.
+        :param default_timeout: Timeout used by execute_command when the caller passes none.
+                                When left as None the server applies its own default
+                                (``SERVER_DEFAULT_TIMEOUT_SECONDS``).
         """
-        super().__init__(model=model, cache_system_data=cache_system_data)
+        super().__init__(model=model, default_timeout=default_timeout, cache_system_data=cache_system_data)
         self._ip = ip
         self.server_ip = server_ip
         self.server_process: LocalProcess | None = None
@@ -76,10 +87,14 @@ class RShellConnection(Connection):
             logger.log(level=log_levels.MODULE_DEBUG, msg="Checking RShell server health")
             try:
                 status_code = requests.get(
-                    f"http://{self.server_ip}/health/{self._ip}", proxies={"no_proxy": "*"}
+                    f"http://{self.server_ip}/health/{self._ip}",
+                    proxies={"no_proxy": "*"},
                 ).status_code
             except requests.RequestException as e:
-                logger.log(level=log_levels.MODULE_DEBUG, msg=f"RShell server health check failed with error: {e}")
+                logger.log(
+                    level=log_levels.MODULE_DEBUG,
+                    msg=f"RShell server health check failed with error: {e}",
+                )
                 status_code = None
             if status_code == 200:
                 logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server is healthy")
@@ -96,7 +111,10 @@ class RShellConnection(Connection):
 
         :param stop_client: Whether to stop the RShell client (default: False).
         """
-        requests.post(f"http://{self.server_ip}/disconnect_client/{self._ip}", proxies={"no_proxy": "*"})
+        requests.post(
+            f"http://{self.server_ip}/disconnect_client/{self._ip}",
+            proxies={"no_proxy": "*"},
+        )
         if stop_client:
             logger.log(level=log_levels.MODULE_DEBUG, msg="Stopping RShell client")
             self.execute_command("end")
@@ -200,14 +218,40 @@ class RShellConnection(Connection):
                 level=log_levels.MODULE_DEBUG,
                 msg="Custom exceptions are not supported for RShellConnection and will be ignored.",
             )
-        timeout_string = f" with timeout {timeout} seconds" if timeout is not None else ""
-        logger.log(level=log_levels.CMD, msg=f"Executing >{self._ip}> '{command}',{timeout_string}")
+        effective_timeout = timeout if timeout is not None else self.default_timeout
+        if effective_timeout is None:
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg=f"No timeout given for '{command}'; the RShell server will apply its default of "
+                f"{SERVER_DEFAULT_TIMEOUT_SECONDS} seconds. Pass 'timeout' or set 'default_timeout' "
+                f"on the connection for commands that legitimately run longer.",
+            )
+        timeout_string = f" with timeout {effective_timeout} seconds" if effective_timeout is not None else ""
+        logger.log(
+            level=log_levels.CMD,
+            msg=f"Executing >{self._ip}> '{command}',{timeout_string}",
+        )
 
         response = requests.post(
             f"http://{self.server_ip}/execute_command",
-            data={"command": command, "timeout": timeout, "ip": self._ip},
+            data={"command": command, "timeout": effective_timeout, "ip": self._ip},
             proxies={"no_proxy": "*"},
         )
+        if response.status_code == 504:
+            reason = response.headers.get(TIMEOUT_REASON_HEADER)
+            waited = effective_timeout if effective_timeout is not None else SERVER_DEFAULT_TIMEOUT_SECONDS
+            message = (
+                f"RShell server timed out after {waited}s waiting for the result of '{command}'. "
+                f"The command was dropped so it will not be executed later by the client."
+            )
+            if reason:
+                message = f"{message} Reason: {reason}."
+            logger.log(level=log_levels.MODULE_DEBUG, msg=message)
+        elif response.status_code >= 500:
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg=f"RShell server returned an internal error ({response.status_code}) for '{command}'.",
+            )
         completed_process = ConnectionCompletedProcess(
             args=command,
             stdout=response.text,
@@ -336,7 +380,10 @@ class RShellConnection(Connection):
                     break
                 time.sleep(1)
             else:
-                logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server did not stop within timeout")
+                logger.log(
+                    level=log_levels.MODULE_DEBUG,
+                    msg="RShell server did not stop within timeout",
+                )
                 raise RuntimeError("RShell server did not stop within timeout")
 
             logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server stopped")

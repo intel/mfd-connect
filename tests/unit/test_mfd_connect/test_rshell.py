@@ -16,7 +16,12 @@ from mfd_typing.os_values import OSBitness, OSName, OSType
 
 from mfd_connect.base import ConnectionCompletedProcess
 from mfd_connect.exceptions import ConnectionCalledProcessError, OsNotSupported
-from mfd_connect.rshell import PLATFORM_POWER_TRANSITION_DELAY_SECONDS, RShellConnection
+from mfd_connect.rshell import (
+    PLATFORM_POWER_TRANSITION_DELAY_SECONDS,
+    SERVER_DEFAULT_TIMEOUT_SECONDS,
+    TIMEOUT_REASON_HEADER,
+    RShellConnection,
+)
 
 
 class TestRShellConnection:
@@ -30,6 +35,8 @@ class TestRShellConnection:
         conn.server_ip = "127.0.0.1"
         conn.server_process = None
         conn.cache_system_data = False
+        # __init__ is mocked out, so the attribute normally set by Connection.__init__ is added here.
+        conn._default_timeout = None
         return conn
 
     def test_init_local_server_start(self, mocker):
@@ -222,7 +229,7 @@ class TestRShellConnection:
 
     def test_execute_command_with_all_unsupported_args_and_skip_logging(self, rshell, mocker):
         post = mocker.patch("mfd_connect.rshell.requests.post")
-        post.return_value = Mock(text="out", headers={"rc": "7"})
+        post.return_value = Mock(status_code=200, text="out", headers={"rc": "7"})
 
         result = rshell.execute_command(
             "echo hello",
@@ -249,7 +256,10 @@ class TestRShellConnection:
         )
 
     def test_execute_command_logs_stdout_and_default_rc(self, rshell, mocker):
-        mocker.patch("mfd_connect.rshell.requests.post", return_value=Mock(text="stdout", headers={}))
+        mocker.patch(
+            "mfd_connect.rshell.requests.post",
+            return_value=Mock(status_code=200, text="stdout", headers={}),
+        )
 
         result = rshell.execute_command("echo hi")
 
@@ -257,12 +267,94 @@ class TestRShellConnection:
         assert result.stdout == "stdout"
 
     def test_execute_command_no_stdout(self, rshell, mocker):
-        mocker.patch("mfd_connect.rshell.requests.post", return_value=Mock(text="", headers={"rc": "0"}))
+        mocker.patch(
+            "mfd_connect.rshell.requests.post",
+            return_value=Mock(status_code=200, text="", headers={"rc": "0"}),
+        )
 
         result = rshell.execute_command("echo hi")
 
         assert result.return_code == 0
         assert result.stdout == ""
+
+    def test_execute_command_logs_server_timeout(self, rshell, mocker, caplog):
+        """A 504 from the server means the command was dropped - it must be visible in the logs."""
+        caplog.set_level(0)
+        mocker.patch(
+            "mfd_connect.rshell.requests.post",
+            return_value=Mock(status_code=504, text="", headers={"rc": "-1"}),
+        )
+
+        result = rshell.execute_command("FS0:\\Tools\\nvmupdate64e.efi /i /l")
+
+        assert result.return_code == -1
+        assert result.stdout == ""
+        assert "timed out" in caplog.text
+
+    def test_execute_command_logs_server_internal_error(self, rshell, mocker, caplog):
+        caplog.set_level(0)
+        mocker.patch(
+            "mfd_connect.rshell.requests.post",
+            return_value=Mock(status_code=500, text="", headers={}),
+        )
+
+        result = rshell.execute_command("echo hi")
+
+        assert result.return_code == -1
+        assert "internal error" in caplog.text
+
+    def test_execute_command_logs_server_timeout_reason(self, rshell, mocker, caplog):
+        """The server explains WHY it timed out - that diagnosis must reach the log."""
+        caplog.set_level(0)
+        reason = "the RShell client 10.10.10.10 stopped polling 620s ago, so it never asked for this command"
+        mocker.patch(
+            "mfd_connect.rshell.requests.post",
+            return_value=Mock(
+                status_code=504,
+                text="",
+                headers={"rc": "-1", TIMEOUT_REASON_HEADER: reason},
+            ),
+        )
+
+        rshell.execute_command("FS0:\\Tools\\nvmupdate64e.efi /i /l")
+
+        assert reason in caplog.text
+
+    def test_execute_command_without_timeout_warns_about_server_default(self, rshell, mocker, caplog):
+        """A command sent without a timeout is silently capped by the server - make that visible."""
+        caplog.set_level(0)
+        post = mocker.patch(
+            "mfd_connect.rshell.requests.post",
+            return_value=Mock(status_code=200, text="out", headers={"rc": "0"}),
+        )
+
+        rshell.execute_command("FS0:\\Tools\\nvmupdate64e.efi /i /l")
+
+        assert post.call_args.kwargs["data"]["timeout"] is None
+        assert str(SERVER_DEFAULT_TIMEOUT_SECONDS) in caplog.text
+
+    def test_execute_command_uses_connection_default_timeout(self, rshell, mocker):
+        """default_timeout must be applied when the caller does not pass one."""
+        rshell._default_timeout = 2500
+        post = mocker.patch(
+            "mfd_connect.rshell.requests.post",
+            return_value=Mock(status_code=200, text="out", headers={"rc": "0"}),
+        )
+
+        rshell.execute_command("FS0:\\Tools\\nvmupdate64e.efi /i /l")
+
+        assert post.call_args.kwargs["data"]["timeout"] == 2500
+
+    def test_execute_command_explicit_timeout_wins_over_default(self, rshell, mocker):
+        rshell._default_timeout = 2500
+        post = mocker.patch(
+            "mfd_connect.rshell.requests.post",
+            return_value=Mock(status_code=200, text="out", headers={"rc": "0"}),
+        )
+
+        rshell.execute_command("ver", timeout=20)
+
+        assert post.call_args.kwargs["data"]["timeout"] == 20
 
     def test_path_python_312_plus(self, rshell, monkeypatch, mocker):
         monkeypatch.setattr(sys, "version_info", (3, 12, 0))
