@@ -4,6 +4,7 @@ import sys
 from subprocess import CalledProcessError
 from textwrap import dedent
 
+import pexpect
 import pytest
 from mfd_typing.os_values import OSBitness, OSType, OSName
 from pytest import raises, fixture
@@ -151,6 +152,41 @@ class TestSolConnection:
 
         assert spawn.call_count == 2
         assert result is second_child
+
+    def test_deactivate_sol_session_treats_eof_as_already_closed(self, sol, mocker):
+        process = mocker.Mock()
+        process.expect.return_value = 2  # index of pexpect.EOF in correct_responses
+        mocker.patch("mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", return_value=process)
+
+        sol._ipmi_tool_name = "ipmiutil"
+        sol._ipmi_parameters = "-F lan2 -U admin -P secret -N 10.10.10.10 -V 4"
+
+        sol._deactivate_sol_session()  # no exception raised
+
+    def test_deactivate_sol_session_raises_on_timeout(self, sol, mocker):
+        process = mocker.Mock()
+        process.expect.side_effect = pexpect.TIMEOUT("timed out")
+        mocker.patch("mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", return_value=process)
+
+        sol._ipmi_tool_name = "ipmiutil"
+        sol._ipmi_parameters = "-F lan2 -U admin -P secret -N 10.10.10.10 -V 4"
+
+        with pytest.raises(SolException):
+            sol._deactivate_sol_session()
+
+    def test_establish_connection_retries_when_deactivate_fails(self, sol, mocker):
+        child = mocker.Mock()
+        child.expect.return_value = 0
+
+        sol._ipmi_tool_name = "ipmiutil"
+        sol._ipmi_parameters = "-F lan2 -U admin -P secret -N 10.10.10.10 -V 4"
+        mocker.patch.object(sol, "_deactivate_sol_session", side_effect=[SolException("dead ipmitool"), None])
+        mocker.patch("mfd_connect.sol.pexpect.spawn", create=True, return_value=child)
+
+        result = sol._establish_connection(retry_count=1)
+
+        assert sol._deactivate_sol_session.call_count == 2
+        assert result is child
 
     def test__parse_selection_regex_fallback_blue_background(self):
         output = "\x1b[44mSelected Boot Option"

@@ -306,7 +306,16 @@ class SolConnection(Connection):
         logger.log(level=log_levels.MODULE_DEBUG, msg="Establishing SUT control handle via IPMI Serial Over LAN!")
 
         # clearing old session first
-        self._deactivate_sol_session(), "Deactivating sol session failed"
+        try:
+            self._deactivate_sol_session()
+        except SolException as e:
+            if retry_count:
+                logger.log(
+                    level=log_levels.MODULE_DEBUG,
+                    msg=f"Deactivating sol session failed: {e}. Retrying...",
+                )
+                return self._establish_connection(retry_count - 1)
+            raise
 
         # establishing new session
         logger.log(level=log_levels.MODULE_DEBUG, msg="Activating new SoL IPMI session...")
@@ -334,10 +343,18 @@ class SolConnection(Connection):
         correct_responses = [
             "completed successfully",
             "Invalid Session Handle or Empty Buffer",
+            pexpect.EOF,
         ]
-        expect_index = process.expect(correct_responses)
-        if expect_index > len(correct_responses) - 1:
-            raise SolException(f"Fatal Error while deactivating previous SoL session! \n{process.before}")
+        try:
+            expect_index = process.expect(correct_responses)
+        except pexpect.TIMEOUT as e:
+            raise SolException(f"Timed out while deactivating previous SoL session! \n{e}") from e
+        if expect_index == len(correct_responses) - 1:
+            # ipmitool already exited (e.g. no live SoL session to close) - treat as already deactivated.
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg="ipmitool exited without a response while deactivating SoL session, assuming already closed.",
+            )
 
     @log_func_info(logger)
     def wait_for_string(self, string_list: List[str], expect_timeout: bool = False, timeout: int = 30) -> int:
