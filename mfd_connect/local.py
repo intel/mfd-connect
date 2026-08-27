@@ -314,6 +314,9 @@ class LocalConnection(PythonConnection):
         stdout, stderr = self._resolve_process_output_arguments(
             stderr_to_stdout=stderr_to_stdout, discard_stdout=discard_stdout, discard_stderr=discard_stderr
         )
+
+        command = self._adjust_command(command)
+
         logger.log(level=log_levels.CMD, msg=f"Starting process >{self._ip}> '{command}', cwd: {cwd}")
         if cwd:
             if self._os_type == OSType.WINDOWS:

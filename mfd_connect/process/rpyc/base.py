@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: MIT
 """Module for RPyC-specific RPyCProcess implementation."""
 
@@ -7,9 +7,9 @@ import typing
 from abc import abstractmethod
 from contextlib import suppress
 from signal import Signals, SIGTERM
-from threading import Lock
+from threading import Event, Lock
 from time import sleep
-from typing import IO, Optional, Iterator, Callable, Type, ClassVar
+from typing import IO, Any, Optional, Iterator, Callable, ClassVar
 
 
 from mfd_common_libs import TimeoutCounter, log_levels
@@ -20,7 +20,6 @@ from mfd_connect.exceptions import (
     RemoteProcessStreamNotAvailable,
     RemoteProcessInvalidState,
 )
-from mfd_connect.util import BatchQueue
 from ..base import RemoteProcess
 
 
@@ -45,6 +44,10 @@ class RPyCProcess(RemoteProcess):
 
     POOL_INTERVAL = 0.1
     """Interval for polling operations."""
+    PIPE_DRAIN_TIMEOUT = 30
+    """Seconds without new output after which a not-yet-EOF watcher is treated as stuck and stopped."""
+    PIPE_DRAIN_MAX_TIMEOUT = 600
+    """Absolute cap (seconds) on draining a single stream, so a child streaming output forever can't hang stop()."""
     _os_type: ClassVar[OSType] = None
     _os_names: ClassVar[typing.List[OSName]] = None
 
@@ -75,50 +78,88 @@ class RPyCProcess(RemoteProcess):
 
         self._cached_stdout_queue = None
         self._stdout_queue_cache_lock = Lock()
+        self._cached_stdout_stop_event = None
+        self._cached_stdout_done_event = None
 
         self._cached_stdout_iter = None
         self._stdout_iter_cache_lock = Lock()
 
         self._cached_stderr_queue = None
         self._stderr_queue_cache_lock = Lock()
+        self._cached_stderr_stop_event = None
+        self._cached_stderr_done_event = None
 
         self._cached_stderr_iter = None
         self._stderr_iter_cache_lock = Lock()
 
     @staticmethod
-    def _get_process_io_queue(process_io: IO, bq: Type[BatchQueue]) -> BatchQueue:
+    def _get_process_io_queue(process_io: IO) -> "tuple[Any, Event, Event]":
         """
-        Wrap process' IO stream in a line-by-line queue.
+        Wrap process' IO stream in a remote-side, batch-drainable buffer.
 
-        Unlike IO stream - resulting queue can be used to peek if new output lines are available.
-        This gives the ability to periodically poll the queue for new results, not blocking the RPyC connection.
+        A watcher thread and the buffer are created on the *remote* side (this method is teleported), so
+        reading the process' stream and buffering its lines happens locally on the remote host - no RPyC
+        traffic per line. The returned drainer exposes ``drain()``, which pops all currently buffered text
+        and returns it as a single string together with an EOF flag; because a ``(str, bool)`` tuple is
+        passed by value, the whole backlog crosses the connection in a single round-trip instead of one
+        round-trip per line. This is what keeps stopping large-output processes fast (the previous
+        line-by-line callback design cost one RPyC round-trip per output line).
 
-        This method is teleported to the remote machine before usage, resulting the queue to be created on the
-        remote side of the connection as well.
+        Two events are also created on the remote side:
+        - ``done_event`` is set once the watcher reaches stream EOF (all output buffered).
+        - ``stop_event`` can be set (via :meth:`_stop_pipe_drain`) to make the watcher stop reading, so it
+          can't keep a detached child's pipe drained forever and grow the remote buffer without bound.
 
-        :param bq: BatchQueue class
         :param process_io: IO object to wrap around (stdout or stderr).
-        :return: Queue wrapped around stdout.readline() call.
+        :return: Tuple of (remote drainer, remote stop event, remote done event).
         """
         import threading
 
-        q = bq()
+        buffer = []
+        buffer_lock = threading.Lock()
+        produced = [0]
+        finished = [False]
+        stop_event = threading.Event()
+        done_event = threading.Event()
+
+        class _RemoteDrainer:
+            """Remote-side buffer whose drain() returns all buffered text at once (bulk, by value)."""
+
+            def drain(self) -> "tuple[str, bool]":
+                with buffer_lock:
+                    text = "".join(buffer)
+                    buffer.clear()
+                    return text, finished[0]
+
+            def progress(self) -> int:
+                return produced[0]
 
         def _watcher() -> None:
             try:
                 with process_io:
                     for line in process_io:
-                        q.put(line)
+                        with buffer_lock:
+                            buffer.append(line)
+                            produced[0] += 1
+                        if stop_event.is_set():
+                            break
             except Exception:
-                q.put("<internal>: Error occurred during io processing. Check responder log for details.")
-                raise
+                if not stop_event.is_set():
+                    with buffer_lock:
+                        buffer.append(
+                            "<internal>: Error occurred during io processing. Check responder log for details."
+                        )
+                        produced[0] += 1
+                    raise
             finally:
-                q.put(None)
+                with buffer_lock:
+                    finished[0] = True
+                done_event.set()
 
         stdout_watcher = threading.Thread(target=_watcher, daemon=True)
         stdout_watcher.start()
 
-        return q
+        return _RemoteDrainer(), stop_event, done_event
 
     @property
     def _remote_get_process_io_queue(self) -> Callable:
@@ -129,19 +170,27 @@ class RPyCProcess(RemoteProcess):
         return self._cached_remote_get_process_io_queue
 
     @property
-    def _stdout_queue(self) -> BatchQueue:
-        """Stdout line-by-line queue."""
+    def _stdout_queue(self) -> Any:
+        """Remote-side stdout drainer (see :meth:`_get_process_io_queue`)."""
         with self._stdout_queue_cache_lock:
             if self._cached_stdout_queue is None:
-                self._cached_stdout_queue = self._remote_get_process_io_queue(self.stdout_stream, BatchQueue)
+                (
+                    self._cached_stdout_queue,
+                    self._cached_stdout_stop_event,
+                    self._cached_stdout_done_event,
+                ) = self._remote_get_process_io_queue(self.stdout_stream)
         return self._cached_stdout_queue
 
     @property
-    def _stderr_queue(self) -> BatchQueue:
-        """Stderr line-by-line queue."""
+    def _stderr_queue(self) -> Any:
+        """Remote-side stderr drainer (see :meth:`_get_process_io_queue`)."""
         with self._stderr_queue_cache_lock:
             if self._cached_stderr_queue is None:
-                self._cached_stderr_queue = self._remote_get_process_io_queue(self.stderr_stream, BatchQueue)
+                (
+                    self._cached_stderr_queue,
+                    self._cached_stderr_stop_event,
+                    self._cached_stderr_done_event,
+                ) = self._remote_get_process_io_queue(self.stderr_stream)
         return self._cached_stderr_queue
 
     @property
@@ -153,27 +202,34 @@ class RPyCProcess(RemoteProcess):
         """
         return self._process.pid
 
-    def _iterate_non_blocking_queue(self, q: BatchQueue) -> Iterator[str]:
+    def _iterate_non_blocking_queue(self, drainer: Any) -> Iterator[str]:
         """
-        Get polling iterator over a non-blocking queue.
+        Get a polling line iterator over a remote drainer.
 
-        Used to get a line-by-line iterator for process' IO streams which doesn't block the connection.
-        :param q: BatchQueue to iterate over.
-        :return: Resulting iterator.
+        Pulls buffered text from the remote side in bulk (one round-trip per poll, not per line) and
+        splits it back into lines locally, so the iterator does not block the RPyC connection.
+
+        :param drainer: Remote drainer returned by :meth:`_get_process_io_queue`.
+        :return: Resulting line iterator.
         """
+        partial = ""
         while True:
-            lines = q.get_many()
+            text, done = drainer.drain()
 
-            if len(lines) == 0:
-                # No lines readily available
+            if text:
+                partial += text
+                chunks = partial.split("\n")
+                partial = chunks.pop()  # trailing text after the last newline (incomplete line)
+                for chunk in chunks:
+                    yield chunk + "\n"
+            elif done:
+                # EOF reached and nothing left buffered - emit any trailing partial line and stop.
+                if partial:
+                    yield partial
+                return
+            else:
+                # No output readily available
                 sleep(self.POOL_INTERVAL)
-                continue
-
-            for line in lines:
-                if line is None:
-                    # None is the last item in a queue, terminating iterator
-                    return
-                yield line
 
     @property
     def running(self) -> bool:  # noqa D102
@@ -256,6 +312,7 @@ class RPyCProcess(RemoteProcess):
 
         if wait is not None:
             self.wait(timeout=wait)
+            self._stop_pipe_drain()
 
     @abstractmethod
     def stop(self, wait: Optional[int] = 60) -> None:  # noqa D102
@@ -279,6 +336,59 @@ class RPyCProcess(RemoteProcess):
 
         with suppress(RemoteProcessStreamNotAvailable):
             _ = self._stderr_queue  # noqa F841
+
+    def _stop_pipe_drain(self, idle_timeout: Optional[float] = None, max_timeout: Optional[float] = None) -> None:
+        """
+        Stop stdout/stderr pipe-drain watcher threads started by :meth:`_start_pipe_drain`.
+
+        Waits for each watcher to reach stream EOF (all buffered output drained), so any output the
+        process emits after the stop signal - e.g. a traffic summary at the end of a large backlog - is
+        fully captured, matching the behaviour of the SSH connection. The wait is bounded by output
+        *inactivity*: as long as new lines keep arriving the drain keeps waiting, no matter how big the
+        backlog or how small the caller's ``wait`` was. A stream is only given up on when either it
+        produces no new output for ``idle_timeout`` seconds without reaching EOF (typically a detached
+        child keeping the pipe open), or the absolute ``max_timeout`` cap is hit (a detached child that
+        streams output forever) - in both cases the watcher is signalled to stop so it can't linger and
+        congest the shared RPyC connection, nor hang ``stop``/``kill`` indefinitely.
+
+        Should be called once the process has been confirmed finished (e.g. after a successful ``wait``).
+
+        :param idle_timeout: Seconds of no new output after which a not-yet-EOF watcher is stopped.
+                             Defaults to :attr:`PIPE_DRAIN_TIMEOUT`.
+        :param max_timeout: Absolute cap in seconds on draining a single stream, regardless of activity.
+                            Defaults to :attr:`PIPE_DRAIN_MAX_TIMEOUT`.
+        """
+        if idle_timeout is None:
+            idle_timeout = self.PIPE_DRAIN_TIMEOUT
+        if max_timeout is None:
+            max_timeout = self.PIPE_DRAIN_MAX_TIMEOUT
+
+        for queue_attr, stop_attr, done_attr in (
+            ("_cached_stdout_queue", "_cached_stdout_stop_event", "_cached_stdout_done_event"),
+            ("_cached_stderr_queue", "_cached_stderr_stop_event", "_cached_stderr_done_event"),
+        ):
+            drainer = getattr(self, queue_attr)
+            stop_event = getattr(self, stop_attr)
+            done_event = getattr(self, done_attr)
+            if drainer is None or stop_event is None or done_event is None:
+                continue
+            with suppress(Exception):
+                last_progress = None
+                idle = TimeoutCounter(idle_timeout)
+                hard_cap = TimeoutCounter(max_timeout)
+                while not done_event.is_set():
+                    progress = drainer.progress()
+                    if progress != last_progress:
+                        # Output is still being buffered - keep waiting and reset the inactivity timer.
+                        last_progress = progress
+                        idle = TimeoutCounter(idle_timeout)
+                    if idle or hard_cap:
+                        # No new output for idle_timeout seconds (detached child keeping the pipe open),
+                        # or the absolute cap was hit (child streaming output forever) - stop the watcher
+                        # to avoid an unbounded remote buffer and an unbounded wait.
+                        stop_event.set()
+                        break
+                    sleep(self.POOL_INTERVAL)
 
     def _get_and_kill_process(self, with_signal: Optional[typing.Union[Signals, str, int]] = None) -> None:
         """

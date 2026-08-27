@@ -324,6 +324,7 @@ class TestAsyncConnection:
             "mfd_connect.base.download_file_windows", return_value=mock.Mock(return_code=0, stdout="")
         )
         conn._manage_temporary_envs = mocker.Mock()
+        conn._remove_temporary_envs = mocker.Mock()
         mocker.patch("mfd_connect.base._generate_random_string", return_value="9yDOrm4D")
         path = Path("/path/to/destination")
         conn.download_file_from_url("http://example.com", path, username="user", password="***")
@@ -334,6 +335,7 @@ class TestAsyncConnection:
             destination_file=path,
             auth=' -Headers @{ Authorization = "Basic $env:TEMP_CREDS_42ad67"}',
         )
+        conn._remove_temporary_envs.assert_called_once_with(["TEMP_CREDS_42ad67"])
 
     def test_download_file_from_url_fallback_to_controller(self, conn, mocker, caplog, mock_os_environ):
         caplog.set_level(log_levels.MODULE_DEBUG)
@@ -376,6 +378,7 @@ class TestAsyncConnection:
             "mfd_connect.base.download_file_windows", return_value=mock.Mock(return_code=0, stdout="")
         )
         conn._manage_temporary_envs = mocker.Mock()
+        conn._remove_temporary_envs = mocker.Mock()
         mocker.patch("mfd_connect.base._generate_random_string", return_value="9yDOrm4D")
         path = Path("/path/to/destination")
         conn.download_file_from_url("http://example.com", path, headers={"user": "pass"})
@@ -386,6 +389,7 @@ class TestAsyncConnection:
             destination_file=path,
             auth="-Headers @{$env:TEMP_KEY_42ad67_0= $env:TEMP_VALUE_42ad67_0;}",
         )
+        conn._remove_temporary_envs.assert_called_once_with(["TEMP_KEY_42ad67_0", "TEMP_VALUE_42ad67_0"])
 
 
 class TestPythonConnections:

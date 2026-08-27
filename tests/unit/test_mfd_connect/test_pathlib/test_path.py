@@ -4,6 +4,7 @@ import sys
 from textwrap import dedent
 
 import pytest
+from mfd_common_libs import log_levels
 from mfd_typing.os_values import OSName, OSType
 
 from mfd_connect.base import ConnectionCompletedProcess
@@ -130,6 +131,36 @@ class TestCustomPosixPath:
         )
         with pytest.raises(ModuleFrameworkDesignError):
             custom_posix_path.exists()
+
+    def test_exists_uses_disable_logger_with_level_when_param_present(self, custom_posix_path, mocker):
+        custom_posix_path._owner.execute_command.return_value = ConnectionCompletedProcess(
+            return_code=0, args="command", stdout="stdout", stderr="stderr"
+        )
+        mock_sig = mocker.Mock()
+        mock_sig.parameters = {"self": None, "level": None}
+        mocker.patch("inspect.signature", return_value=mock_sig)
+        mock_disable_logger = mocker.patch("mfd_connect.pathlib.path.DisableLogger")
+        mock_disable_logger.return_value.__enter__ = mocker.Mock(return_value=None)
+        mock_disable_logger.return_value.__exit__ = mocker.Mock(return_value=False)
+
+        custom_posix_path.exists()
+
+        mock_disable_logger.assert_called_once_with(level=log_levels.OUT)
+
+    def test_exists_uses_disable_logger_without_level_when_param_absent(self, custom_posix_path, mocker):
+        custom_posix_path._owner.execute_command.return_value = ConnectionCompletedProcess(
+            return_code=0, args="command", stdout="stdout", stderr="stderr"
+        )
+        mock_sig = mocker.Mock()
+        mock_sig.parameters = {"self": None}
+        mocker.patch("inspect.signature", return_value=mock_sig)
+        mock_disable_logger = mocker.patch("mfd_connect.pathlib.path.DisableLogger")
+        mock_disable_logger.return_value.__enter__ = mocker.Mock(return_value=None)
+        mock_disable_logger.return_value.__exit__ = mocker.Mock(return_value=False)
+
+        custom_posix_path.exists()
+
+        mock_disable_logger.assert_called_once_with()
 
     @pytest.mark.skipif(sys.version_info > (3, 12), reason="requires python3.11 or lower")
     def test_expanduser_pre312(self, mocker):

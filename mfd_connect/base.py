@@ -712,18 +712,19 @@ class AsyncConnection(Connection, ABC):
 
     def _hide_credentials(
         self, username: str, password: str, headers: dict[str, str]
-    ) -> tuple[str, str, dict[str, str]]:
+    ) -> tuple[str, str, dict[str, str], list[str]]:
         """
         Hide credentials in temporary environment variables.
 
         :param username: Optional username
         :param password: Optional password
         :param headers: Optionals Headers
-        :return: Tuple with authentication string, options and headers
+        :return: Tuple with authentication string, options, headers and names of created environment variables
         """
         os_name = self.get_os_name()
         auth = options = ""
         env, headers_with_env_prefix = {}, {}
+        created_env_keys: list[str] = []
         prefix = "$env:" if os_name == OSName.WINDOWS else "$"
         # create random hash as suffix for temporary environment variables
         random_hash = hashlib.sha256(_generate_random_string(8).encode()).hexdigest()[:6]
@@ -741,9 +742,11 @@ class AsyncConnection(Connection, ABC):
         if os_name == OSName.WINDOWS:
             if username and password:  # hide user-password into basic authentication header parameter
                 auth = self._prepare_auth_for_user_pwd(username, password, f"{prefix}TEMP_CREDS_{random_hash}")
+                created_env_keys.append(f"TEMP_CREDS_{random_hash}")
             elif headers:
                 auth = _prepare_headers_with_env_powershell(headers_with_env_prefix)
                 self._manage_temporary_envs(env)  # hide header variables in temporary environment variables
+                created_env_keys.extend(env)
         else:
             if username and password:
                 env = {env_key: username, env_value: password}
@@ -751,7 +754,8 @@ class AsyncConnection(Connection, ABC):
             elif headers:
                 headers = headers_with_env_prefix
             self._manage_temporary_envs(env)  # hide variables in temporary environment variables in python way
-        return auth, options, headers
+            created_env_keys.extend(env)
+        return auth, options, headers, created_env_keys
 
     def download_file_from_url(
         self,
@@ -783,9 +787,10 @@ class AsyncConnection(Connection, ABC):
 
         os_name = self.get_os_name()
         auth = options = ""
+        temporary_env_keys: list[str] = []
 
         if hide_credentials:
-            auth, options, headers = self._hide_credentials(username, password, headers)
+            auth, options, headers, temporary_env_keys = self._hide_credentials(username, password, headers)
         else:
             if username and password:
                 if os_name == OSName.WINDOWS:
@@ -794,35 +799,39 @@ class AsyncConnection(Connection, ABC):
                 else:
                     options = f" -u {username}:{password} "
 
-        if os_name == OSName.WINDOWS:
-            result = download_file_windows(
-                connection=self,
-                url=url,
-                destination_file=destination_file,
-                auth=auth if auth else _prepare_headers_powershell(headers),
-            )
-        elif os_name == OSName.ESXI:
-            result = download_file_esxi(
-                connection=self,
-                url=url,
-                destination_file=destination_file,
-                options=options,
-                headers=headers,
-            )
-        else:
-            result = download_file_unix(
-                connection=self,
-                url=url,
-                destination_file=destination_file,
-                options=options if options else _prepare_headers_curl(headers),
-            )
-            if any(error in result.stdout for error in ["curl: command not found", "Could not resolve host"]):
-                result = download_file_unix_via_controller(
+        try:
+            if os_name == OSName.WINDOWS:
+                result = download_file_windows(
                     connection=self,
+                    url=url,
+                    destination_file=destination_file,
+                    auth=auth if auth else _prepare_headers_powershell(headers),
+                )
+            elif os_name == OSName.ESXI:
+                result = download_file_esxi(
+                    connection=self,
+                    url=url,
+                    destination_file=destination_file,
+                    options=options,
+                    headers=headers,
+                )
+            else:
+                result = download_file_unix(
+                    connection=self,
+                    url=url,
                     destination_file=destination_file,
                     options=options if options else _prepare_headers_curl(headers),
-                    url=url,
                 )
+                if any(error in result.stdout for error in ["curl: command not found", "Could not resolve host"]):
+                    result = download_file_unix_via_controller(
+                        connection=self,
+                        destination_file=destination_file,
+                        options=options if options else _prepare_headers_curl(headers),
+                        url=url,
+                    )
+        finally:
+            if temporary_env_keys:
+                self._remove_temporary_envs(temporary_env_keys)
 
         if not result.return_code:
             return
@@ -931,6 +940,17 @@ class PythonConnection(AsyncConnection, ABC):
         """
         logger.log(level=log_levels.MODULE_DEBUG, msg=f"Setting temporary environment variables: {env.keys()}")
         self.modules().os.environ.update(env)
+
+    def _remove_temporary_envs(self, env_keys: Iterable[str]) -> None:
+        """
+        Remove temporary environment variables from the python process.
+
+        :param env_keys: names of environment variables to remove
+        """
+        logger.log(level=log_levels.MODULE_DEBUG, msg=f"Removing temporary environment variables: {env_keys}")
+        environ = self.modules().os.environ
+        for key in env_keys:
+            environ.pop(key, None)
 
     @staticmethod
     def _log_execution_results(

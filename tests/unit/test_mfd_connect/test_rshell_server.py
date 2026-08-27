@@ -4,19 +4,22 @@
 
 import importlib.util
 import runpy
+import sys
 from pathlib import Path
 
 import pytest
 
 
-SERVER_SCRIPT_PATH = Path(__file__).resolve().parents[3] / "mfd_connect" / "rshell_server.py"
+SERVER_SCRIPT_PATH = Path(__file__).resolve().parents[3] / "mfd_connect" / "rshell_server" / "rshell_server.py"
 
 
 def _load_server_module(module_name: str = "test_rs_server"):
+    """Load the rshell_server module dynamically for testing."""
     spec = importlib.util.spec_from_file_location(module_name, SERVER_SCRIPT_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    sys.modules[module_name] = module
     return module
 
 
@@ -164,6 +167,19 @@ class TestRShellServerScript:
         assert response_given_rc.status_code == 200
         assert server_module.output_queue["cmd-b"].output == "output-b"
         assert server_module.output_queue["cmd-b"].rc == 3
+
+    def test_run_function_starts_flask(self, server_module, monkeypatch):
+        """Test that the run() function starts Flask with correct host and port."""
+        captured = {}
+
+        def _fake_run(self, host, port):
+            captured["host"] = host
+            captured["port"] = port
+
+        monkeypatch.setattr("flask.app.Flask.run", _fake_run)
+        server_module.run()
+
+        assert captured == {"host": "0.0.0.0", "port": 80}
 
     def test_main_block_starts_flask(self, monkeypatch):
         captured = {}

@@ -117,18 +117,94 @@ class TestRShellConnection:
 
         rshell.stop_server.assert_not_called()
 
-    def test_run_server(self, rshell, mocker):
+    def test_run_server_success(self, rshell, mocker):
+        """Test successful RShell server startup using module execution."""
+        process = mocker.Mock()
+        process.running = True
+
         conn = mocker.Mock()
-        server_file = Path("C:/tmp/rshell.py")
-        conn.path.return_value = server_file
-        conn.modules().sys.executable = "python_exe"
-        conn.start_process.return_value = "proc"
+        conn.modules().sys.executable = "python"
+        conn.start_process.return_value = process
         mocker.patch("mfd_connect.rshell.LocalConnection", return_value=conn)
+
+        class FakeTimeoutCounter:
+            def __init__(self, _timeout):
+                self.count = 0
+
+            def __bool__(self):
+                self.count += 1
+                return self.count > 0  # exits on first check since process.running is True
+
+        mocker.patch("mfd_connect.rshell.TimeoutCounter", FakeTimeoutCounter)
 
         result = rshell._run_server()
 
-        assert result == "proc"
-        conn.start_process.assert_called_once_with(f"python_exe {server_file.parent / 'rshell_server.py'}")
+        assert result == process
+        conn.start_process.assert_called_once_with("python -m mfd_connect.rshell_server")
+
+    def test_run_server_timeout_loop_executes(self, rshell, mocker):
+        """Test that the timeout loop in _run_server executes at least once."""
+        process = mocker.Mock()
+        process.running = True  # Process is running successfully
+
+        conn = mocker.Mock()
+        conn.modules().sys.executable = "python"
+        conn.start_process.return_value = process
+        mocker.patch("mfd_connect.rshell.LocalConnection", return_value=conn)
+
+        call_count = 0
+
+        class FakeTimeoutCounter:
+            def __init__(self, _timeout):
+                nonlocal call_count
+                call_count = 0
+
+            def __bool__(self):
+                nonlocal call_count
+                call_count += 1
+                # First call: return False so while not timeout is True (loop executes)
+                # Then: return True so loop exits
+                return call_count > 1
+
+        mocker.patch("mfd_connect.rshell.TimeoutCounter", FakeTimeoutCounter)
+
+        result = rshell._run_server()
+
+        assert result == process
+        # Verify the while loop executed at least once
+        assert call_count >= 1
+
+    def test_run_server_server_not_running_raises_error(self, rshell, mocker):
+        """Test error when server process is not running."""
+        process = mocker.Mock()
+        process.running = False  # Process crashed
+        process.return_code = 1
+        process.stdout_text = "stdout output"
+        process.stderr_text = "stderr output"
+
+        conn = mocker.Mock()
+        conn.modules().sys.executable = "python"
+        conn.start_process.return_value = process
+        mocker.patch("mfd_connect.rshell.LocalConnection", return_value=conn)
+
+        call_count = 0
+
+        class FakeTimeoutCounter:
+            def __init__(self, _timeout):
+                nonlocal call_count
+                call_count = 0
+
+            def __bool__(self):
+                nonlocal call_count
+                call_count += 1
+                # First call: return False so while not timeout is True (loop executes once)
+                # The RuntimeError will be raised on the first iteration
+                return call_count > 1
+
+        mocker.patch("mfd_connect.rshell.TimeoutCounter", FakeTimeoutCounter)
+
+        with pytest.raises(RuntimeError, match="RShell server failed to start.*Exit code: 1"):
+            rshell._run_server()
 
     def test_type_checking_import_block_executes(self, monkeypatch):
         class _FakeBaseModel:
@@ -242,6 +318,18 @@ class TestRShellConnection:
         assert rshell._check_if_efi_shell() is True
         assert rshell._check_if_efi_shell() is False
 
+    def test_check_if_efi_shell_uses_20_second_timeout(self, rshell, mocker):
+        """Test that _check_if_efi_shell uses 20 second timeout for ver command."""
+        execute_mock = mocker.Mock(
+            return_value=ConnectionCompletedProcess(args="ver", return_code=0, stdout="UEFI Shell v2")
+        )
+        rshell.execute_command = execute_mock
+
+        rshell._check_if_efi_shell()
+
+        # Verify execute_command was called with timeout=20
+        execute_mock.assert_called_once_with("ver", shell=False, expected_return_codes=None, timeout=20)
+
     def test_get_os_type_paths(self, rshell, mocker):
         rshell._check_if_efi_shell = mocker.Mock(side_effect=[True, False, False])
         rshell._check_if_unix = mocker.Mock(side_effect=[True, False])
@@ -319,10 +407,16 @@ class TestRShellConnection:
         rshell.server_process = None
         rshell.stop_server()
 
+        local_connection = mocker.patch("mfd_connect.rshell.LocalConnection").return_value
+        kill_process_by_pid = mocker.patch("mfd_connect.rshell.kill_process_by_pid")
         server_process = mocker.Mock()
+        server_process.pid = 1234
+        server_process.running = False
         server_process.stdout_text = "server out"
         rshell.server_process = server_process
 
         rshell.stop_server()
 
-        server_process.kill.assert_called_once()
+        local_connection.enable_sudo.assert_called_once()
+        kill_process_by_pid.assert_called_once_with(local_connection, 1234)
+        local_connection.disable_sudo.assert_called_once()

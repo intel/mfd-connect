@@ -1189,6 +1189,11 @@ If code cannot establish connection, it will start deployment of python using [D
 
 `rshell.py` is a Connection class that calls RESTful API endpoints provided by `rshell_server.py` to execute commands on the EFI Shell target system. If required, starts `rshell_server.py` on the host machine.
 
+RShell server can be started manually using the following command:
+```bash
+python -m mfd_connect.rshell_server
+```
+
 ## OS supported:
 * LNX
 * WINDOWS

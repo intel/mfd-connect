@@ -17,8 +17,9 @@ from mfd_typing.os_values import OSBitness, OSName, OSType
 from mfd_connect.exceptions import ConnectionCalledProcessError, OsNotSupported
 from mfd_connect.local import LocalConnection
 from mfd_connect.pathlib.path import CustomPath, custom_path_factory
-from mfd_connect.process.base import RemoteProcess
+from mfd_connect.process.local.base import LocalProcess
 from mfd_connect.util.decorators import conditional_cache
+from mfd_connect.util.process_utils import kill_process_by_pid
 
 from .base import Connection, ConnectionCompletedProcess
 
@@ -61,7 +62,7 @@ class RShellConnection(Connection):
         super().__init__(model=model, cache_system_data=cache_system_data)
         self._ip = ip
         self.server_ip = server_ip
-        self.server_process = None
+        self.server_process: LocalProcess | None = None
         if server_ip == "127.0.0.1":
             # start Rshell server
             self.server_process = self._run_server()
@@ -102,11 +103,20 @@ class RShellConnection(Connection):
         if stop_server and self.server_process:
             self.stop_server()
 
-    def _run_server(self) -> RemoteProcess:
+    def _run_server(self) -> LocalProcess:
         """Run RShell server locally."""
         conn = LocalConnection()
-        server_file = conn.path(__file__).parent / "rshell_server.py"
-        return conn.start_process(f"{conn.modules().sys.executable} {server_file}")
+        conn.enable_sudo()
+        process: LocalProcess = conn.start_process(f"{conn.modules().sys.executable} -m mfd_connect.rshell_server")
+        conn.disable_sudo()
+        timeout = TimeoutCounter(1)
+        while not timeout:
+            if not process.running:
+                raise RuntimeError(
+                    f"RShell server failed to start. Exit code: {process.return_code}\n"
+                    f"STDOUT: {process.stdout_text}\nSTDERR: {process.stderr_text}"
+                )
+        return process
 
     def execute_command(
         self,
@@ -246,7 +256,7 @@ class RShellConnection(Connection):
         """Check if EFI shell is the client OS."""
         efi_shell_check_command = "ver"
         output = self.execute_command(
-            efi_shell_check_command, shell=False, expected_return_codes=None, timeout=10
+            efi_shell_check_command, shell=False, expected_return_codes=None, timeout=20
         ).stdout
         return any(out in output for out in ["UEFI Shell", "UEFI Interactive Shell"])
 
@@ -316,6 +326,23 @@ class RShellConnection(Connection):
         """Stop the RShell server."""
         if self.server_process:
             logger.log(level=log_levels.MODULE_DEBUG, msg="Stopping RShell server")
-            self.server_process.kill()
+            conn = LocalConnection()
+            conn.enable_sudo()
+            kill_process_by_pid(conn, self.server_process.pid)
+            timeout = TimeoutCounter(10)
+            conn.disable_sudo()
+            while not timeout:
+                if not self.server_process.running:
+                    break
+                time.sleep(1)
+            else:
+                logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server did not stop within timeout")
+                raise RuntimeError("RShell server did not stop within timeout")
+
             logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server stopped")
-            logger.log(level=log_levels.MODULE_DEBUG, msg=self.server_process.stdout_text)
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg=self.server_process.stdout_text
+                if self.server_process.stdout_text
+                else "RShell server had no stdout",
+            )
