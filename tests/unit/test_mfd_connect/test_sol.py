@@ -4,6 +4,7 @@ import sys
 from subprocess import CalledProcessError
 from textwrap import dedent
 
+import pexpect
 import pytest
 from mfd_typing.os_values import OSBitness, OSType, OSName
 from pytest import raises, fixture
@@ -151,6 +152,146 @@ class TestSolConnection:
 
         assert spawn.call_count == 2
         assert result is second_child
+
+    def test_deactivate_sol_session_success_first_attempt(self, sol, mocker):
+        sol._ipmi_tool_name = "ipmiutil"
+        sol._ipmi_parameters = "-F lan2 -U admin -P secret -N 10.10.10.10 -V 4"
+        child = mocker.Mock()
+        child.expect.return_value = 0
+        popen_spawn = mocker.patch("mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", return_value=child)
+        kill_mock = mocker.patch.object(sol, "_kill_defunct_ipmiutil_processes")
+
+        sol._deactivate_sol_session()
+
+        popen_spawn.assert_called_once()
+        kill_mock.assert_not_called()
+
+    def test_deactivate_sol_session_retries_after_timeout_then_succeeds(self, sol, mocker):
+        sol._ipmi_tool_name = "ipmiutil"
+        sol._ipmi_parameters = "-F lan2 -U admin -P secret -N 10.10.10.10 -V 4"
+        first_child = mocker.Mock()
+        first_child.expect.side_effect = pexpect.TIMEOUT("timed out")
+        second_child = mocker.Mock()
+        second_child.expect.return_value = 0
+        popen_spawn = mocker.patch(
+            "mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", side_effect=[first_child, second_child]
+        )
+        kill_mock = mocker.patch.object(sol, "_kill_defunct_ipmiutil_processes")
+
+        sol._deactivate_sol_session()
+
+        assert popen_spawn.call_count == 2
+        kill_mock.assert_not_called()
+
+    def test_deactivate_sol_session_falls_back_to_kill_after_repeated_failures(self, sol, mocker):
+        """Both attempts raise pexpect exceptions (defunct process) - the whole run must not crash."""
+        sol._ipmi_tool_name = "ipmiutil"
+        sol._ipmi_parameters = "-F lan2 -U admin -P secret -N 10.10.10.10 -V 4"
+        first_child = mocker.Mock()
+        first_child.expect.side_effect = pexpect.TIMEOUT("timed out")
+        second_child = mocker.Mock()
+        second_child.expect.side_effect = pexpect.EOF("eof")
+        popen_spawn = mocker.patch(
+            "mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", side_effect=[first_child, second_child]
+        )
+        kill_mock = mocker.patch.object(sol, "_kill_defunct_ipmiutil_processes")
+
+        sol._deactivate_sol_session()  # must not raise
+
+        assert popen_spawn.call_count == 2
+        kill_mock.assert_called_once()
+
+    def test_kill_defunct_ipmiutil_processes_kills_found_pid(self, sol, mocker):
+        sol._ipmi_tool_name = "ipmiutil"
+        ps_child = mocker.Mock()
+        ps_child.before = (
+            b"berta     206865  0.0  0.3   9368  6700 pts/0    T    15:40   0:00 "
+            b"ipmiutil sol -a -F lan2 -U      -P         -N 10.102.20.61 -V 4\n"
+            b"berta     213349  0.0  0.1   6544  2392 pts/1    S+   16:00   0:00 grep --color=auto ipmiutil\n"
+        )
+        kill_child = mocker.Mock()
+        popen_spawn = mocker.patch("mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", side_effect=[ps_child, kill_child])
+
+        sol._kill_defunct_ipmiutil_processes()
+
+        assert popen_spawn.call_args_list[0].args[0] == "ps aux | grep ipmiutil"
+        assert popen_spawn.call_args_list[1].args[0] == "sudo -n kill -KILL 206865"
+        ps_child.expect.assert_called_once_with(pexpect.EOF)
+        kill_child.expect.assert_called_once_with(pexpect.EOF)
+
+    def test_kill_defunct_ipmiutil_processes_kills_multiple_pids(self, sol, mocker):
+        """Mirrors real-world output: two stopped (T) ipmiutil sessions must both be killed."""
+        sol._ipmi_tool_name = "ipmiutil"
+        ps_child = mocker.Mock()
+        ps_child.before = (
+            b"berta     206865  0.0  0.3   9368  6700 pts/0    T    15:40   0:00 "
+            b"ipmiutil sol -a -F lan2 -U      -P         -N 10.102.20.61 -V 4\n"
+            b"berta     210671  0.0  0.3   9368  6644 pts/0    T    15:52   0:00 "
+            b"ipmiutil sol -a -F lan2 -U      -P         -N 10.102.20.61 -V 4\n"
+            b"berta     213349  0.0  0.1   6544  2392 pts/1    S+   16:00   0:00 grep --color=auto ipmiutil\n"
+        )
+        kill_child_1 = mocker.Mock()
+        kill_child_2 = mocker.Mock()
+        popen_spawn = mocker.patch(
+            "mfd_connect.sol.pexpect.popen_spawn.PopenSpawn",
+            side_effect=[ps_child, kill_child_1, kill_child_2],
+        )
+
+        sol._kill_defunct_ipmiutil_processes()
+
+        assert popen_spawn.call_args_list[1].args[0] == "sudo -n kill -KILL 206865"
+        assert popen_spawn.call_args_list[2].args[0] == "sudo -n kill -KILL 210671"
+
+    def test_kill_defunct_ipmiutil_processes_kills_only_stopped_ones(self, sol, mocker):
+        """Mix of stopped (T) and healthy (S+) processes - only the stopped one gets killed."""
+        sol._ipmi_tool_name = "ipmiutil"
+        ps_child = mocker.Mock()
+        ps_child.before = (
+            b"berta     206865  0.0  0.3   9368  6700 pts/0    T    15:40   0:00 "
+            b"ipmiutil sol -a -F lan2 -U      -P         -N 10.102.20.61 -V 4\n"
+            b"berta     220000  0.0  0.3   9368  6700 pts/0    S+   15:41   0:00 "
+            b"ipmiutil sol -a -F lan2 -U      -P         -N 10.102.20.62 -V 4\n"
+            b"berta     213349  0.0  0.1   6544  2392 pts/1    S+   16:00   0:00 grep --color=auto ipmiutil\n"
+        )
+        kill_child = mocker.Mock()
+        popen_spawn = mocker.patch("mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", side_effect=[ps_child, kill_child])
+
+        sol._kill_defunct_ipmiutil_processes()
+
+        assert popen_spawn.call_count == 2  # ps aux + single kill (healthy one skipped)
+        assert popen_spawn.call_args_list[1].args[0] == "sudo -n kill -KILL 206865"
+
+    def test_kill_defunct_ipmiutil_processes_raises_when_no_pid_found(self, sol, mocker):
+        sol._ipmi_tool_name = "ipmiutil"
+        ps_child = mocker.Mock()
+        ps_child.before = b"user     3333  0.0  0.1  1  1  pts/0  S+  12:00  0:00 grep ipmiutil\n"
+        mocker.patch("mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", return_value=ps_child)
+
+        with pytest.raises(SolException):
+            sol._kill_defunct_ipmiutil_processes()
+
+    def test_kill_defunct_ipmiutil_processes_raises_when_ps_times_out(self, sol, mocker):
+        sol._ipmi_tool_name = "ipmiutil"
+        ps_child = mocker.Mock()
+        ps_child.expect.side_effect = pexpect.TIMEOUT("timed out")
+        mocker.patch("mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", return_value=ps_child)
+
+        with pytest.raises(SolException):
+            sol._kill_defunct_ipmiutil_processes()
+
+    def test_kill_defunct_ipmiutil_processes_raises_when_kill_fails(self, sol, mocker):
+        sol._ipmi_tool_name = "ipmiutil"
+        ps_child = mocker.Mock()
+        ps_child.before = (
+            b"berta     206865  0.0  0.3   9368  6700 pts/0    T    15:40   0:00 "
+            b"ipmiutil sol -a -F lan2 -U      -P         -N 10.102.20.61 -V 4\n"
+        )
+        kill_child = mocker.Mock()
+        kill_child.expect.side_effect = pexpect.TIMEOUT("timed out")
+        mocker.patch("mfd_connect.sol.pexpect.popen_spawn.PopenSpawn", side_effect=[ps_child, kill_child])
+
+        with pytest.raises(SolException):
+            sol._kill_defunct_ipmiutil_processes()
 
     def test__parse_selection_regex_fallback_blue_background(self):
         output = "\x1b[44mSelected Boot Option"

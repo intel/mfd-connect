@@ -327,17 +327,109 @@ class SolConnection(Connection):
 
         return sol_connection_process
 
-    def _deactivate_sol_session(self) -> None:
-        # clearing old session
+    def _deactivate_sol_session(self, retry_count: int = 2) -> None:
+        """
+        Clear/deactivate previous SoL IPMI session before opening a new one.
+
+        Retries graceful deactivation via ipmiutil, then falls back to killing
+        defunct ipmiutil process(es) if all attempts fail.
+
+        :param retry_count: Number of graceful deactivation attempts
+        :raises SolException: if graceful deactivation and fallback cleanup fail
+        """
         logger.log(level=log_levels.MODULE_DEBUG, msg="Clearing/Deactivating previous SoL IPMI session...")
-        process = pexpect.popen_spawn.PopenSpawn(f"{self._ipmi_tool_name} sol -d {self._ipmi_parameters}", timeout=60)
+        # Both patterns below signal a successful deactivation (either the session was closed,
+        # or there was none to close in the first place) - pexpect.expect() raises TIMEOUT/EOF
+        # if neither is matched, so a returned index always means success.
         correct_responses = [
             "completed successfully",
             "Invalid Session Handle or Empty Buffer",
         ]
-        expect_index = process.expect(correct_responses)
-        if expect_index > len(correct_responses) - 1:
-            raise SolException(f"Fatal Error while deactivating previous SoL session! \n{process.before}")
+
+        for attempt in range(1, retry_count + 1):
+            logger.log(
+                level=log_levels.MODULE_DEBUG,
+                msg=f"Attempt {attempt}/{retry_count} to deactivate previous SoL session...",
+            )
+            try:
+                process = pexpect.popen_spawn.PopenSpawn(
+                    f"{self._ipmi_tool_name} sol -d {self._ipmi_parameters}", timeout=60
+                )
+                process.expect(correct_responses)
+            except (pexpect.TIMEOUT, pexpect.EOF) as e:
+                logger.log(
+                    level=log_levels.MODULE_DEBUG,
+                    msg=f"Attempt {attempt}/{retry_count}: "
+                    f"{self._ipmi_tool_name} did not respond as expected while deactivating SoL session: {e}",
+                )
+                continue
+
+            logger.log(level=log_levels.MODULE_DEBUG, msg="...Done - previous SoL session deactivated.")
+            return
+
+        logger.log(
+            level=log_levels.MODULE_DEBUG,
+            msg=f"Could not gracefully deactivate SoL session after {retry_count} attempt(s). "
+            f"Trying to locate and kill defunct {self._ipmi_tool_name} process(es)...",
+        )
+        self._kill_defunct_ipmiutil_processes()
+
+    def _kill_defunct_ipmiutil_processes(self) -> None:
+        """
+        Find and kill defunct/stopped ipmiutil process(es).
+
+        Processes are matched by command name and only STAT='T' entries are killed.
+        'T' means stopped by job control signal, while healthy ipmiutil usually
+        has 'S' or 'S+' (interruptible sleep, waiting for an event).
+
+        :raises SolException: if process listing fails, no defunct process is found,
+            or kill operation fails
+        """
+        try:
+            ps_process = pexpect.popen_spawn.PopenSpawn(f"ps aux | grep {self._ipmi_tool_name}", timeout=30)
+            ps_process.expect(pexpect.EOF)
+            ps_output = ps_process.before.decode("ASCII", errors="ignore")
+        except (pexpect.TIMEOUT, pexpect.EOF) as e:
+            raise SolException(f"Fatal Error while searching for defunct {self._ipmi_tool_name} process(es)! \n{e}")
+
+        defunct_pids = []
+        for line in ps_output.splitlines():
+            columns = line.split()
+            if len(columns) <= 10:
+                continue
+            pid, stat, command = columns[1], columns[7], columns[10]
+            if command.rsplit("/", 1)[-1] != self._ipmi_tool_name:
+                continue
+            if stat.startswith("T"):
+                defunct_pids.append(pid)
+            else:
+                logger.log(
+                    level=log_levels.MODULE_DEBUG,
+                    msg=f"{self._ipmi_tool_name} process PID {pid} is in a healthy state '{stat}' "
+                    "- leaving it running.",
+                )
+
+        if not defunct_pids:
+            raise SolException(
+                f"Fatal Error while deactivating previous SoL session! "
+                f"No defunct (stopped, STAT=T) {self._ipmi_tool_name} process(es) found to kill."
+            )
+
+        logger.log(
+            level=log_levels.MODULE_DEBUG,
+            msg=f"Found defunct {self._ipmi_tool_name} process(es) with PID(s): {defunct_pids}. Killing them...",
+        )
+        for pid in defunct_pids:
+            logger.log(level=log_levels.MODULE_DEBUG, msg=f"Killing defunct {self._ipmi_tool_name} process, PID: {pid}")
+            try:
+                # sudo -n (non-interactive) fails immediately if a password prompt would appear,
+                # avoiding indefinite blocking in automation.
+                kill_process = pexpect.popen_spawn.PopenSpawn(f"sudo -n kill -KILL {pid}", timeout=30)
+                kill_process.expect(pexpect.EOF)
+            except (pexpect.TIMEOUT, pexpect.EOF) as e:
+                raise SolException(f"Fatal Error while killing defunct {self._ipmi_tool_name} process PID {pid}! \n{e}")
+
+        logger.log(level=log_levels.MODULE_DEBUG, msg=f"...Done - defunct {self._ipmi_tool_name} process(es) killed.")
 
     @log_func_info(logger)
     def wait_for_string(self, string_list: List[str], expect_timeout: bool = False, timeout: int = 30) -> int:
