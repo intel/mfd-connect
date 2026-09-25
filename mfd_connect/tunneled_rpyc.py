@@ -7,10 +7,9 @@ import time
 import typing
 from typing import Union
 
-import rpyc
 from mfd_common_libs import log_levels
 from netaddr import IPAddress
-from rpyc import ClassicService
+import rpyc
 
 from .rpyc import RPyCConnection
 
@@ -84,12 +83,13 @@ class TunneledRPyCConnection(RPyCConnection):
         self._port = port
         self._connection_timeout = connection_timeout
         self._enable_bg_serving_thread = enable_bg_serving_thread
+        remote_rpyc = self.modules().rpyc
 
         self._connection = self._tunnel_connection.modules.rpyc.connect(
             str(ip),
             port=port or RPyCConnection.DEFAULT_RPYC_6_0_0_RESPONDER_PORT,
             ipv6=ipv6,
-            service=ClassicService,
+            service=remote_rpyc.ClassicService,
             keepalive=True,
             config={"sync_request_timeout": connection_timeout},
         )
