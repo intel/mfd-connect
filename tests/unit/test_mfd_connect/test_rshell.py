@@ -5,6 +5,7 @@
 import sys
 import types
 import runpy
+import shlex
 from pathlib import Path
 from subprocess import CalledProcessError
 from unittest.mock import Mock, patch
@@ -15,6 +16,7 @@ from mfd_typing.cpu_values import CPUArchitecture
 from mfd_typing.os_values import OSBitness, OSName, OSType
 
 from mfd_connect.base import ConnectionCompletedProcess
+from mfd_connect.local import LocalConnection
 from mfd_connect.exceptions import ConnectionCalledProcessError, OsNotSupported
 from mfd_connect.rshell import (
     PLATFORM_POWER_TRANSITION_DELAY_SECONDS,
@@ -147,7 +149,37 @@ class TestRShellConnection:
         result = rshell._run_server()
 
         assert result == process
-        conn.start_process.assert_called_once_with("python -m mfd_connect.rshell_server")
+        conn.start_process.assert_called_once_with(
+            "python -m mfd_connect.rshell_server", discard_stdout=True, discard_stderr=True
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pipe regression")
+    def test_run_server_discards_output_larger_than_pipe_capacity(self, rshell, mocker, tmp_path):
+        script = tmp_path / "verbose_server.py"
+        script.write_text("import sys\nsys.stdout.write('x' * 1048576)\nsys.stderr.write('x' * 1048576)\n")
+        conn = LocalConnection()
+        start_process = conn.start_process
+        command = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+        mocker.patch.object(conn, "enable_sudo")
+        mocker.patch.object(conn, "disable_sudo")
+        mocker.patch.object(conn, "start_process", side_effect=lambda _, **kwargs: start_process(command, **kwargs))
+        mocker.patch("mfd_connect.rshell.LocalConnection", return_value=conn)
+        mocker.patch("mfd_connect.rshell.TimeoutCounter", return_value=True)
+
+        process = rshell._run_server()
+        try:
+            assert process.wait(timeout=5) == 0
+            rshell.server_process = process
+            mocker.patch(
+                "mfd_connect.rshell.requests.post", return_value=Mock(status_code=200, text="", headers={"rc": "0"})
+            )
+            kill_process = mocker.patch("mfd_connect.rshell.kill_process_by_pid")
+            mocker.patch("mfd_connect.rshell.TimeoutCounter", return_value=False)
+            rshell.disconnect(stop_client=True, stop_server=True)
+            kill_process.assert_called_once_with(conn, process.pid)
+        finally:
+            if process.running:
+                process.stop(wait=5)
 
     def test_run_server_timeout_loop_executes(self, rshell, mocker):
         """Test that the timeout loop in _run_server executes at least once."""
@@ -186,8 +218,10 @@ class TestRShellConnection:
         process = mocker.Mock()
         process.running = False  # Process crashed
         process.return_code = 1
-        process.stdout_text = "stdout output"
-        process.stderr_text = "stderr output"
+        stdout = mocker.PropertyMock(side_effect=AssertionError("Discarded stdout must not be read"))
+        stderr = mocker.PropertyMock(side_effect=AssertionError("Discarded stderr must not be read"))
+        type(process).stdout_text = stdout
+        type(process).stderr_text = stderr
 
         conn = mocker.Mock()
         conn.modules().sys.executable = "python"
@@ -212,6 +246,8 @@ class TestRShellConnection:
 
         with pytest.raises(RuntimeError, match="RShell server failed to start.*Exit code: 1"):
             rshell._run_server()
+        stdout.assert_not_called()
+        stderr.assert_not_called()
 
     def test_type_checking_import_block_executes(self, monkeypatch):
         class _FakeBaseModel:
@@ -508,7 +544,10 @@ class TestRShellConnection:
         server_process = mocker.Mock()
         server_process.pid = 1234
         server_process.running = False
-        server_process.stdout_text = "server out"
+        stdout = mocker.PropertyMock(side_effect=AssertionError("Discarded stdout must not be read"))
+        stderr = mocker.PropertyMock(side_effect=AssertionError("Discarded stderr must not be read"))
+        type(server_process).stdout_text = stdout
+        type(server_process).stderr_text = stderr
         rshell.server_process = server_process
 
         rshell.stop_server()
@@ -516,3 +555,5 @@ class TestRShellConnection:
         local_connection.enable_sudo.assert_called_once()
         kill_process_by_pid.assert_called_once_with(local_connection, 1234)
         local_connection.disable_sudo.assert_called_once()
+        stdout.assert_not_called()
+        stderr.assert_not_called()

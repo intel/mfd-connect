@@ -125,14 +125,18 @@ class RShellConnection(Connection):
         """Run RShell server locally."""
         conn = LocalConnection()
         conn.enable_sudo()
-        process: LocalProcess = conn.start_process(f"{conn.modules().sys.executable} -m mfd_connect.rshell_server")
+        process: LocalProcess = conn.start_process(
+            f"{conn.modules().sys.executable} -m mfd_connect.rshell_server",
+            discard_stdout=True,
+            discard_stderr=True,
+        )
         conn.disable_sudo()
         timeout = TimeoutCounter(1)
         while not timeout:
             if not process.running:
                 raise RuntimeError(
                     f"RShell server failed to start. Exit code: {process.return_code}\n"
-                    f"STDOUT: {process.stdout_text}\nSTDERR: {process.stderr_text}"
+                    "Server stdout and stderr are discarded. Run the server manually to inspect its diagnostics."
                 )
         return process
 
@@ -389,9 +393,3 @@ class RShellConnection(Connection):
                 raise RuntimeError("RShell server did not stop within timeout")
 
             logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server stopped")
-            logger.log(
-                level=log_levels.MODULE_DEBUG,
-                msg=self.server_process.stdout_text
-                if self.server_process.stdout_text
-                else "RShell server had no stdout",
-            )
