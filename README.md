@@ -1177,9 +1177,12 @@ If code cannot establish connection, it will start deployment of python using [D
     Responses:
     * `200` - command output in the body, `rc` header holds the return code.
     * `400` - no command provided.
+    * `413` - command output exceeds 16 MiB.
+    * `429` - a client or command admission limit was reached; existing commands are not evicted.
+    * `503` - pending results exceed the storage limit.
     * `504` - the result did not arrive within `timeout` (+ client poll grace period). The body is empty
-      and `rc` is `-1`. The command is marked as *abandoned*, so it is never executed late and its result
-      is discarded on arrival - this keeps the caller and the EFI client in sync after a timeout.
+      and `rc` is `-1`. Queued commands are removed and late results are discarded.
+      A command already picked up by the client may still execute; a timeout does not stop it.
       The `X-RShell-Timeout-Reason` header explains *why* the wait failed (see below).
   * `/post_result` - Endpoint to post results back to the host.
     Headers fields:
@@ -1195,6 +1198,17 @@ If code cannot establish connection, it will start deployment of python using [D
   * `/getCommandToExecute` - Endpoint to retrieve commands to be executed on the EFI Shell target system. Returns commandline with generated CommandID. Commands abandoned after a timeout are skipped. Every poll also refreshes the client liveness marker.
   * `/health/<ip>` - Reports `200` only when the client is known **and** polled within `CLIENT_LIVENESS_TIMEOUT_SECONDS`. A client that was seen once but went silent is reported as `503`, so a dead client no longer looks healthy for the rest of the run.
   * `/disconnect_client/<ip>` - Removes the client and drops everything still queued for it.
+
+Results are removed after collection. Unknown, duplicate and abandoned results are not retained.
+The server accepts up to 256 clients, 512 active commands and 256 queued commands per client.
+Stored result payloads are limited to 64 MiB in total and 16 MiB per result, measured as UTF-8 bytes.
+Overflow is reported without truncating results or evicting another caller's result.
+Disconnecting clears the client's pending results and wakes its waiting callers.
+Idle client records are reclaimed during subsequent requests; running commands keep their client records.
+
+HTTP errors other than `504` raise `requests.HTTPError` in `RShellConnection.execute_command()`.
+Server-generated HTTP errors have an empty body, `rc: -1` and an `X-RShell-Error` header;
+they are not returned as successful command output.
 
 ### Diagnosing a timeout
 

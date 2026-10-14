@@ -79,6 +79,9 @@ def _get_command():  # noqa: ANN202
     _id = rsp.getheader("CommandID")
     if status == 204:
         return None
+    if status != 200:
+        rsp.read()
+        raise RuntimeError("RShell command request failed with HTTP {}".format(status))
 
     print("Waiting for command from server: ")
     data_received = rsp.read()
