@@ -10,6 +10,11 @@ import time
 from pathlib import Path
 
 import pytest
+from werkzeug.exceptions import (
+    RequestEntityTooLarge,
+    ServiceUnavailable,
+    TooManyRequests,
+)
 
 
 SERVER_SCRIPT_PATH = Path(__file__).resolve().parents[3] / "mfd_connect" / "rshell_server" / "rshell_server.py"
@@ -33,6 +38,10 @@ class TestRShellServerScript:
         module = _load_server_module()
         module.output_queue.clear()
         module.output_queue_timestamps.clear()
+        module.output_sizes.clear()
+        module.output_errors.clear()
+        module.active_commands.clear()
+        module.control_command_deadlines.clear()
         module.abandoned_command_ids.clear()
         module.command_dict_queue.clear()
         module.clients.clear()
@@ -53,8 +62,9 @@ class TestRShellServerScript:
         assert command_id not in server_module.output_queue_timestamps
 
     def test_get_output_timeout(self, server_module):
+        command_id = server_module.add_command_to_queue("ver", "192.0.2.1")
         with pytest.raises(TimeoutError, match="Command timed out"):
-            server_module.get_output("missing", timeout=-5)
+            server_module.get_output(command_id, timeout=-5)
 
     def test_get_output_timeout_marks_command_as_abandoned(self, server_module):
         """A caller that gives up must mark its command so it is not executed/stored later."""
@@ -65,15 +75,16 @@ class TestRShellServerScript:
 
     def test_get_output_is_woken_up_by_posted_result(self, server_module):
         """Waiting is event driven - the waiter returns as soon as the result is stored."""
+        command_id = server_module.add_command_to_queue("ver", "192.0.2.1")
 
         def _post_later():
             time.sleep(0.1)
-            server_module._store_output("cmd-later", "later", 4)
+            server_module._store_output(command_id, "later", 4)
 
         threading.Thread(target=_post_later, daemon=True).start()
 
         started = time.monotonic()
-        result = server_module.get_output("cmd-later", timeout=10)
+        result = server_module.get_output(command_id, timeout=10)
         elapsed = time.monotonic() - started
 
         assert result.output == "later"
@@ -102,10 +113,13 @@ class TestRShellServerScript:
     def test_add_command_to_queue_is_bounded(self, server_module):
         """Per-client queue must not grow without limits."""
         limit = server_module.MAX_PENDING_COMMANDS_PER_CLIENT
-        for index in range(limit + 25):
+        for index in range(limit):
             server_module.add_command_to_queue(f"echo {index}", "10.0.0.9")
+        with pytest.raises(TooManyRequests):
+            server_module.add_command_to_queue("echo overflow", "10.0.0.9")
 
-        assert server_module.command_dict_queue["10.0.0.9"].qsize() <= limit
+        assert server_module.command_dict_queue["10.0.0.9"].qsize() == limit
+        assert server_module.command_dict_queue["10.0.0.9"].get_nowait().str == "echo 0"
 
     def test_health_check_endpoint(self, server_module):
         client = server_module.app.test_client()
@@ -218,12 +232,129 @@ class TestRShellServerScript:
         """The body must stay empty so the caller never stores an error page as stdout."""
         client = server_module.app.test_client()
 
-        response = client.post("/execute_command", data={"command": "ver", "timeout": "-5", "ip": "1.2.3.4"})
+        response = client.post(
+            "/execute_command",
+            data={"command": "ver", "timeout": "-5", "ip": "1.2.3.4"},
+        )
 
         assert response.status_code == 504
         assert response.get_data() == b""
         assert response.headers["rc"] == "-1"
         assert response.headers[server_module.TIMEOUT_REASON_HEADER]
+
+    @pytest.mark.parametrize(
+        "command",
+        ["echo first\r\nsecond", "echo \u03bb", "echo " + "\u03bb\n" * 10000, "echo " + "x" * 10000],
+        ids=["multiline", "unicode", "oversized_unicode", "oversized_ascii"],
+    )
+    def test_timeout_reason_is_single_line_ascii_and_bounded(self, server_module, monkeypatch, command):
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: 1000.0)
+        ip = "192.0.2.1"
+        server_module.client_last_seen[ip] = 1000.0
+        response = server_module.app.test_client().post(
+            "/execute_command", data={"command": command, "timeout": "-5", "ip": ip}
+        )
+
+        assert response.status_code == 504
+        assert response.data == b""
+        reason = response.headers[server_module.TIMEOUT_REASON_HEADER]
+        expected = server_module.diagnose_timeout(ip, command, waiting_since=1000.0)
+        assert reason == expected.encode("unicode_escape").decode("ascii")[:1024]
+        assert len(reason.encode("ascii")) <= 1024
+        assert "\r" not in reason and "\n" not in reason
+        assert not server_module.active_commands
+
+    def test_later_timeout_remembers_command_abandoned_after_default_wait(self, server_module, monkeypatch):
+        now = 1000.0
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: now)
+        client = server_module.app.test_client()
+        ip = "192.0.2.1"
+        picked_up = False
+
+        def advance_wait(seconds):
+            nonlocal now, picked_up
+            if not picked_up:
+                assert client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": ip}).status_code == 200
+                picked_up = True
+            now += seconds
+
+        monkeypatch.setattr(server_module._output_available, "wait", advance_wait)
+        first = client.post("/execute_command", data={"command": "hanging-tool", "ip": ip})
+        assert first.status_code == 504
+        assert now == 1605.0
+        assert "picked this command up" in first.headers[server_module.TIMEOUT_REASON_HEADER]
+
+        second = client.post("/execute_command", data={"command": "ver", "ip": ip, "timeout": "-5"})
+        assert second.status_code == 504
+        assert "still blocked executing 'hanging-tool'" in second.headers[server_module.TIMEOUT_REASON_HEADER]
+        assert ip not in server_module.client_last_seen
+        assert ip not in server_module.clients
+
+    def test_running_diagnostics_expire_without_removing_active_commands(self, server_module, monkeypatch):
+        now = 1000.0
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: now)
+        client = server_module.app.test_client()
+        for ip in ("192.0.2.1", "192.0.2.2"):
+            server_module.add_command_to_queue("tool", ip)
+            client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": ip})
+        abandoned = server_module.client_running_command["192.0.2.1"].command_id
+        server_module._abandon_command(abandoned)
+
+        now += 3599
+        server_module._cleanup_stale_outputs()
+        assert "192.0.2.1" in server_module.client_running_command
+        now += 1
+        server_module._cleanup_stale_outputs()
+        assert "192.0.2.1" not in server_module.client_running_command
+        assert "192.0.2.2" in server_module.client_running_command
+        assert server_module.client_running_command["192.0.2.2"].command_id in server_module.active_commands
+
+    def test_running_diagnostics_cap_evicts_abandoned_not_active_commands(self, server_module, monkeypatch):
+        monkeypatch.setattr(server_module, "MAX_CLIENTS", 2)
+        now = 1000.0
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: now)
+        client = server_module.app.test_client()
+        for ip in ("192.0.2.1", "192.0.2.2"):
+            server_module.add_command_to_queue("tool", ip)
+            client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": ip})
+        server_module._abandon_command(server_module.client_running_command["192.0.2.2"].command_id)
+        now += server_module.CLIENT_LIVENESS_TIMEOUT_SECONDS + 1
+        server_module._cleanup_stale_outputs()
+        assert set(server_module.client_running_command) == {"192.0.2.1", "192.0.2.2"}
+        server_module.add_command_to_queue("next tool", "192.0.2.3")
+        assert client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": "192.0.2.3"}).status_code == 200
+        assert set(server_module.client_running_command) == {"192.0.2.1", "192.0.2.3"}
+
+    @pytest.mark.parametrize("completion", ["result", "poll", "disconnect"])
+    def test_retained_running_diagnostic_is_cleared_when_client_returns(self, server_module, monkeypatch, completion):
+        now = 1000.0
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: now)
+        client = server_module.app.test_client()
+        ip = "192.0.2.1"
+        command_id = server_module.add_command_to_queue("tool", ip)
+        client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": ip})
+        server_module._abandon_command(command_id)
+        now += server_module.CLIENT_LIVENESS_TIMEOUT_SECONDS + 1
+        server_module._cleanup_stale_outputs()
+        assert ip in server_module.client_running_command
+        assert ip not in server_module.clients
+
+        if completion == "result":
+            assert (
+                client.post(
+                    "/post_result",
+                    data=b"late output",
+                    headers={"CommandID": command_id},
+                    environ_base={"REMOTE_ADDR": ip},
+                ).status_code
+                == 200
+            )
+        elif completion == "poll":
+            assert client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": ip}).status_code == 204
+        else:
+            assert client.post(f"/disconnect_client/{ip}").status_code == 200
+        assert ip not in server_module.client_running_command
+        assert not server_module.output_queue
 
     def test_disconnect_client_clears_liveness_state(self, server_module):
         """A reconnecting client must not inherit the liveness state of the previous session."""
@@ -264,7 +395,7 @@ class TestRShellServerScript:
         assert response.status_code == 200
         assert response.headers["CommandID"] == live_id
         assert response.get_data(as_text=True) == "echo alive"
-        assert abandoned_id not in server_module.abandoned_command_ids
+        assert abandoned_id not in server_module.active_commands
 
     def test_get_command_to_execute_returns_204_when_only_abandoned(self, server_module):
         client = server_module.app.test_client()
@@ -277,12 +408,13 @@ class TestRShellServerScript:
 
     def test_post_exception_endpoint(self, server_module):
         client = server_module.app.test_client()
-        response = client.post("/exception", data=b"boom", headers={"CommandID": "cid-1"})
+        command_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+        response = client.post("/exception", data=b"boom", headers={"CommandID": command_id})
 
         assert response.status_code == 200
-        assert server_module.output_queue["cid-1"].output == "boom"
-        assert server_module.output_queue["cid-1"].rc == -1
-        assert "cid-1" in server_module.output_queue_timestamps
+        assert server_module.output_queue[command_id].output == "boom"
+        assert server_module.output_queue[command_id].rc == -1
+        assert command_id in server_module.output_queue_timestamps
 
     def test_execute_command_endpoint_paths(self, server_module, monkeypatch):
         client = server_module.app.test_client()
@@ -317,6 +449,70 @@ class TestRShellServerScript:
         assert response_normal.headers["Content-type"].startswith("text/plain")
         assert response_normal.headers["CommandID"]
 
+    @pytest.mark.parametrize("command", ["end", "reset -c"])
+    @pytest.mark.parametrize("timeout", [None, 10])
+    def test_undelivered_control_commands_expire_and_release_client_slots(
+        self, server_module, monkeypatch, command, timeout
+    ):
+        now = 1000.0
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: now)
+        client = server_module.app.test_client()
+        for index in range(server_module.MAX_CLIENTS):
+            data = {"command": command, "ip": f"192.0.2.{index}"}
+            if timeout is not None:
+                data["timeout"] = str(timeout)
+            assert client.post("/execute_command", data=data).status_code == 200
+        old_ids = set(server_module.active_commands)
+        assert len(old_ids) == server_module.MAX_CLIENTS
+        new_request = {"command": command, "ip": "198.51.100.1"}
+        now += (600 if timeout is None else timeout) + server_module.CLIENT_LOOP_WAIT_SECONDS - 0.1
+        assert client.post("/execute_command", data=new_request).status_code == 429
+        now += 0.1
+        assert client.post("/execute_command", data=new_request).status_code == 200
+        assert len(server_module.active_commands) == 1
+        assert set(server_module.command_dict_queue) == {"198.51.100.1"}
+        assert not old_ids.intersection(server_module.control_command_deadlines)
+        assert client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": "192.0.2.1"}).status_code == 204
+        assert not server_module._store_output(next(iter(old_ids)), "late", 0)
+
+    @pytest.mark.parametrize("command", ["end", "reset -c"])
+    def test_control_command_deadline_is_cleared_after_delivery_or_disconnect(
+        self, server_module, monkeypatch, command
+    ):
+        now = 1000.0
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: now)
+        client = server_module.app.test_client()
+        ip = "192.0.2.1"
+        assert client.post("/execute_command", data={"command": command, "ip": ip, "timeout": "10"}).status_code == 200
+        response = client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": ip})
+        assert response.status_code == 200
+        assert response.get_data(as_text=True) == command
+        assert not server_module.control_command_deadlines
+        assert not server_module.active_commands
+        now += 15
+        server_module._cleanup_stale_outputs()
+        assert response.headers["CommandID"] not in server_module.abandoned_command_ids
+
+        client.post("/execute_command", data={"command": command, "ip": ip})
+        assert server_module.control_command_deadlines
+        client.post(f"/disconnect_client/{ip}")
+        assert not server_module.control_command_deadlines
+        assert not server_module.active_commands
+
+    def test_control_expiry_preserves_other_commands_for_same_client(self, server_module, monkeypatch):
+        now = 1000.0
+        monkeypatch.setattr(server_module.time, "monotonic", lambda: now)
+        client = server_module.app.test_client()
+        ip = "192.0.2.1"
+        client.post("/execute_command", data={"command": "end", "ip": ip, "timeout": "10"})
+        normal_id = server_module.add_command_to_queue("ver", ip)
+        now += 15
+        response = client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": ip})
+        assert response.status_code == 200
+        assert response.headers["CommandID"] == normal_id
+        assert normal_id in server_module.active_commands
+        assert not server_module.control_command_deadlines
+
     def test_execute_command_returns_gateway_timeout_instead_of_html_error(self, server_module):
         """A timeout must not return a Flask HTML 500 page, which the caller stores as stdout."""
         client = server_module.app.test_client()
@@ -338,7 +534,7 @@ class TestRShellServerScript:
     def test_timed_out_command_does_not_desync_next_command(self, server_module):
         """After a timeout the next command must succeed - the server has to re-sync."""
         client = server_module.app.test_client()
-        ip = "10.102.23.150"
+        ip = "192.0.2.1"
 
         timed_out = client.post(
             "/execute_command",
@@ -383,22 +579,24 @@ class TestRShellServerScript:
 
     def test_post_result_endpoint(self, server_module):
         client = server_module.app.test_client()
+        first_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+        second_id = server_module.add_command_to_queue("help", "192.0.2.1")
 
-        response_default_rc = client.post("/post_result", data=b"output-a", headers={"CommandID": "cmd-a"})
+        response_default_rc = client.post("/post_result", data=b"output-a", headers={"CommandID": first_id})
         assert response_default_rc.status_code == 200
-        assert server_module.output_queue["cmd-a"].output == "output-a"
-        assert server_module.output_queue["cmd-a"].rc == -1
-        assert "cmd-a" in server_module.output_queue_timestamps
+        assert server_module.output_queue[first_id].output == "output-a"
+        assert server_module.output_queue[first_id].rc == -1
+        assert first_id in server_module.output_queue_timestamps
 
         response_given_rc = client.post(
             "/post_result",
             data=b"output-b",
-            headers={"CommandID": "cmd-b", "rc": "3"},
+            headers={"CommandID": second_id, "rc": "3"},
         )
         assert response_given_rc.status_code == 200
-        assert server_module.output_queue["cmd-b"].output == "output-b"
-        assert server_module.output_queue["cmd-b"].rc == 3
-        assert "cmd-b" in server_module.output_queue_timestamps
+        assert server_module.output_queue[second_id].output == "output-b"
+        assert server_module.output_queue[second_id].rc == 3
+        assert second_id in server_module.output_queue_timestamps
 
     def test_cleanup_stale_outputs_removes_expired_entries_only(self, server_module):
         # Timestamps simulate time.monotonic() values (seconds since arbitrary boot reference).
@@ -423,14 +621,16 @@ class TestRShellServerScript:
         assert "old" not in server_module.abandoned_command_ids
         assert "recent" in server_module.abandoned_command_ids
 
-    def test_output_queue_is_hard_capped(self, server_module):
+    def test_output_queue_is_hard_capped(self, server_module, monkeypatch):
         """Even without TTL expiry the stored outputs must stay bounded."""
-        limit = server_module.MAX_STORED_OUTPUTS
-        for index in range(limit + 120):
-            server_module._store_output(f"cid-{index}", "payload", 0)
-
-        assert len(server_module.output_queue) <= limit
-        assert len(server_module.output_queue_timestamps) == len(server_module.output_queue)
+        monkeypatch.setattr(server_module, "MAX_STORED_OUTPUTS", 1)
+        first_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+        second_id = server_module.add_command_to_queue("help", "192.0.2.1")
+        server_module._store_output(first_id, "payload", 0)
+        with pytest.raises(ServiceUnavailable):
+            server_module._store_output(second_id, "overflow", 0)
+        assert list(server_module.output_queue) == [first_id]
+        assert len(server_module.output_queue_timestamps) == 1
 
     def test_concurrent_access_is_thread_safe(self, server_module):
         """Werkzeug serves requests in threads - shared state must not raise or corrupt."""
@@ -439,10 +639,9 @@ class TestRShellServerScript:
         def _worker(worker_id):
             try:
                 for index in range(30):
-                    command_id = f"w{worker_id}-{index}"
+                    command_id = server_module.add_command_to_queue(f"cmd{index}", f"192.0.2.{worker_id + 1}")
                     server_module._store_output(command_id, "data", 0)
                     server_module.get_output(command_id, timeout=1)
-                    server_module.add_command_to_queue(f"cmd{index}", f"10.0.1.{worker_id}")
                     server_module._cleanup_stale_outputs()
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{type(exc).__name__}: {exc}")
@@ -455,6 +654,8 @@ class TestRShellServerScript:
 
         assert not errors
         assert not server_module.output_queue
+        assert not server_module.active_commands
+        assert not server_module.output_sizes
 
     def test_run_function_starts_flask(self, server_module, monkeypatch):
         """Test that the run() function starts Flask with correct host and port."""
@@ -468,6 +669,147 @@ class TestRShellServerScript:
         server_module.run()
 
         assert captured == {"host": "0.0.0.0", "port": 80}
+
+    def test_late_results_stay_rejected_after_tombstone_eviction(self, server_module, monkeypatch):
+        monkeypatch.setattr(server_module, "MAX_ABANDONED_COMMAND_IDS", 1)
+        command_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+        server_module._abandon_command(command_id)
+        server_module._abandon_command("another-command")
+
+        assert command_id not in server_module.abandoned_command_ids
+        assert server_module._store_output(command_id, "late", 0) is False
+        assert server_module._store_output(command_id, "duplicate", 0) is False
+        client = server_module.app.test_client()
+        assert client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": "192.0.2.1"}).status_code == 204
+        assert not server_module.output_queue
+        assert not server_module.output_sizes
+
+    def test_output_is_only_collected_once(self, server_module):
+        command_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+        assert server_module._store_output(command_id, "first", 0)
+        assert not server_module._store_output(command_id, "duplicate", 1)
+        assert server_module.get_output(command_id).output == "first"
+        assert not server_module._store_output(command_id, "late duplicate", 1)
+        assert not server_module.active_commands
+        assert not server_module.output_queue_timestamps
+        assert not server_module.output_sizes
+        assert not server_module.command_dict_queue
+
+    @pytest.mark.parametrize("connected", [False, True])
+    def test_disconnect_clears_all_command_states(self, server_module, connected):
+        client = server_module.app.test_client()
+        ip = "192.0.2.1"
+        running = server_module.add_command_to_queue("ver", ip)
+        if connected:
+            client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": ip})
+        ready = server_module.add_command_to_queue("help", ip)
+        server_module._store_output(ready, "result", 0)
+        pending = server_module.add_command_to_queue("echo pending", ip)
+
+        assert client.post(f"/disconnect_client/{ip}").status_code == 200
+        for command_id in (running, ready, pending):
+            assert not server_module._store_output(command_id, "late", 0)
+            with pytest.raises(TimeoutError):
+                server_module.get_output(command_id)
+        assert not server_module.active_commands
+        assert not server_module.output_queue
+        assert not server_module.output_sizes
+        assert not server_module.output_queue_timestamps
+        assert not server_module.command_dict_queue
+        assert not server_module.client_running_command
+
+    def test_active_command_limit_rejects_without_eviction(self, server_module, monkeypatch):
+        monkeypatch.setattr(server_module, "MAX_ACTIVE_COMMANDS", 1)
+        first_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+        response = server_module.app.test_client().post("/execute_command", data={"command": "help", "ip": "192.0.2.2"})
+        assert response.status_code == 429
+        assert response.headers["rc"] == "-1"
+        assert response.headers["X-RShell-Error"]
+        assert list(server_module.active_commands) == [first_id]
+        assert "192.0.2.2" not in server_module.command_dict_queue
+
+    def test_client_limit_and_idle_cleanup(self, server_module, monkeypatch):
+        monkeypatch.setattr(server_module, "MAX_CLIENTS", 1)
+        client = server_module.app.test_client()
+        assert client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": "192.0.2.1"}).status_code == 204
+        assert client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": "192.0.2.2"}).status_code == 429
+        server_module.client_last_seen["192.0.2.1"] -= server_module.CLIENT_LIVENESS_TIMEOUT_SECONDS + 1
+        assert client.get("/getCommandToExecute", environ_base={"REMOTE_ADDR": "192.0.2.2"}).status_code == 204
+        assert server_module.clients == ["192.0.2.2"]
+
+    def test_idle_cleanup_preserves_active_commands(self, server_module):
+        command_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+        server_module.client_last_seen["192.0.2.1"] = 0
+        server_module._cleanup_stale_outputs(now=1000)
+        assert command_id in server_module.active_commands
+        assert "192.0.2.1" in server_module.client_last_seen
+
+    def test_output_byte_limits(self, server_module, monkeypatch):
+        assert server_module.MAX_OUTPUT_BYTES == 16 * 1024 * 1024
+        assert server_module.MAX_STORED_OUTPUT_BYTES == 64 * 1024 * 1024
+        monkeypatch.setattr(server_module, "MAX_OUTPUT_BYTES", 4)
+        monkeypatch.setattr(server_module, "MAX_STORED_OUTPUT_BYTES", 8)
+        ids = [server_module.add_command_to_queue("ver", "192.0.2.1") for _ in range(4)]
+        assert server_module._store_output(ids[0], "\u00e9\u00e9", 0)
+        assert server_module._store_output(ids[1], "1234", 0)
+        assert sum(server_module.output_sizes.values()) == 8
+        with pytest.raises(ServiceUnavailable):
+            server_module._store_output(ids[2], "x", 0)
+        with pytest.raises(RequestEntityTooLarge):
+            server_module._store_output(ids[3], "12345", 0)
+        with pytest.raises(ServiceUnavailable):
+            server_module.get_output(ids[2])
+        with pytest.raises(RequestEntityTooLarge):
+            server_module.get_output(ids[3])
+        assert server_module.get_output(ids[0]).output == "\u00e9\u00e9"
+        assert server_module.get_output(ids[1]).output == "1234"
+        assert not server_module.output_sizes
+        assert not server_module.output_errors
+        assert not server_module.active_commands
+
+    @pytest.mark.parametrize("endpoint", ["/post_result", "/exception"])
+    def test_oversized_request_notifies_waiter(self, server_module, endpoint):
+        server_module.app.config["MAX_CONTENT_LENGTH"] = 4
+        command_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+        response = server_module.app.test_client().post(
+            endpoint, data=b"12345", headers={"CommandID": command_id, "rc": "0"}
+        )
+        assert response.status_code == 413
+        with pytest.raises(RequestEntityTooLarge):
+            server_module.get_output(command_id)
+        assert not server_module.output_queue
+        assert not server_module.output_errors
+        assert not server_module.active_commands
+
+    def test_disconnect_wakes_waiting_caller(self, server_module):
+        command_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+        errors = []
+        started = threading.Event()
+
+        def wait_for_output():
+            started.set()
+            try:
+                server_module.get_output(command_id, timeout=60)
+            except TimeoutError as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=wait_for_output, daemon=True)
+        thread.start()
+        assert started.wait(1)
+        server_module.app.test_client().post("/disconnect_client/192.0.2.1")
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert len(errors) == 1
+
+    def test_repeated_results_release_payload_memory(self, server_module):
+        for _ in range(32):
+            command_id = server_module.add_command_to_queue("ver", "192.0.2.1")
+            server_module._store_output(command_id, "x" * 65536, 0)
+            assert len(server_module.get_output(command_id).output) == 65536
+        assert not server_module.output_queue
+        assert not server_module.output_sizes
+        assert not server_module.active_commands
+        assert not server_module.command_dict_queue
 
     def test_main_block_starts_flask(self, monkeypatch):
         captured = {}

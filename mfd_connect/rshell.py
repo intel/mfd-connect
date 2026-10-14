@@ -242,16 +242,18 @@ class RShellConnection(Connection):
             waited = effective_timeout if effective_timeout is not None else SERVER_DEFAULT_TIMEOUT_SECONDS
             message = (
                 f"RShell server timed out after {waited}s waiting for the result of '{command}'. "
-                f"The command was dropped so it will not be executed later by the client."
+                f"Any queued command was removed; a command already picked up by the client may still be running."
             )
             if reason:
                 message = f"{message} Reason: {reason}."
             logger.log(level=log_levels.MODULE_DEBUG, msg=message)
-        elif response.status_code >= 500:
+        elif response.status_code >= 400:
             logger.log(
                 level=log_levels.MODULE_DEBUG,
-                msg=f"RShell server returned an internal error ({response.status_code}) for '{command}'.",
+                msg=f"RShell request failed ({response.status_code}): "
+                f"{response.headers.get('X-RShell-Error', response.reason)}",
             )
+            response.raise_for_status()
         completed_process = ConnectionCompletedProcess(
             args=command,
             stdout=response.text,

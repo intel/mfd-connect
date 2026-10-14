@@ -61,7 +61,11 @@ time.sleep = _sleep
 
 
 def _close(connection):  # noqa: ANN001, ANN202
-    """Close a connection without letting a broken socket kill the client."""
+    """
+    Close a connection without letting a broken socket kill the client.
+
+    :param connection: HTTP connection to close, or None when no connection was created.
+    """
     if connection is None:
         return
     try:
@@ -79,6 +83,9 @@ def _get_command():  # noqa: ANN202
     _id = rsp.getheader("CommandID")
     if status == 204:
         return None
+    if status != 200:
+        rsp.read()
+        raise RuntimeError("RShell command request failed with HTTP {}".format(status))
 
     print("Waiting for command from server: ")
     data_received = rsp.read()

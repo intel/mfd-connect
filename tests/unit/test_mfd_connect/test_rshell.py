@@ -291,17 +291,21 @@ class TestRShellConnection:
         assert result.stdout == ""
         assert "timed out" in caplog.text
 
-    def test_execute_command_logs_server_internal_error(self, rshell, mocker, caplog):
+    @pytest.mark.parametrize("status", [400, 413, 429, 500, 503])
+    def test_execute_command_raises_on_http_error(self, rshell, mocker, caplog, status):
         caplog.set_level(0)
+        response = requests.Response()
+        response.status_code = status
+        response.headers["X-RShell-Error"] = "Request failed"
         mocker.patch(
             "mfd_connect.rshell.requests.post",
-            return_value=Mock(status_code=500, text="", headers={}),
+            return_value=response,
         )
 
-        result = rshell.execute_command("echo hi")
+        with pytest.raises(requests.HTTPError):
+            rshell.execute_command("echo hi")
 
-        assert result.return_code == -1
-        assert "internal error" in caplog.text
+        assert f"RShell request failed ({status}): Request failed" in caplog.text
 
     def test_execute_command_logs_server_timeout_reason(self, rshell, mocker, caplog):
         """The server explains WHY it timed out - that diagnosis must reach the log."""

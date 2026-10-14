@@ -1177,9 +1177,12 @@ If code cannot establish connection, it will start deployment of python using [D
     Responses:
     * `200` - command output in the body, `rc` header holds the return code.
     * `400` - no command provided.
+    * `413` - command output exceeds 16 MiB.
+    * `429` - a client or command admission limit was reached; existing commands are not evicted.
+    * `503` - pending results exceed the storage limit.
     * `504` - the result did not arrive within `timeout` (+ client poll grace period). The body is empty
-      and `rc` is `-1`. The command is marked as *abandoned*, so it is never executed late and its result
-      is discarded on arrival - this keeps the caller and the EFI client in sync after a timeout.
+      and `rc` is `-1`. Queued commands are removed and late results are discarded.
+      A command already picked up by the client may still execute; a timeout does not stop it.
       The `X-RShell-Timeout-Reason` header explains *why* the wait failed (see below).
   * `/post_result` - Endpoint to post results back to the host.
     Headers fields:
@@ -1196,6 +1199,20 @@ If code cannot establish connection, it will start deployment of python using [D
   * `/health/<ip>` - Reports `200` only when the client is known **and** polled within `CLIENT_LIVENESS_TIMEOUT_SECONDS`. A client that was seen once but went silent is reported as `503`, so a dead client no longer looks healthy for the rest of the run.
   * `/disconnect_client/<ip>` - Removes the client and drops everything still queued for it.
 
+Results are removed after collection. Unknown, duplicate and abandoned results are not retained.
+The server accepts up to 256 clients, 512 active commands and 256 queued commands per client.
+Stored result payloads are limited to 64 MiB in total and 16 MiB per result, measured as UTF-8 bytes.
+Overflow is reported without truncating results or evicting another caller's result.
+Disconnecting clears the client's pending results and wakes its waiting callers.
+Idle client records are reclaimed during subsequent requests; actively awaited commands keep their client records.
+Unfinished-command diagnostics are retained separately, up to 256 records. Records without an active waiter
+expire one hour after pickup; the oldest such records may be evicted earlier to enforce the cap.
+Receiving the matching result, a new poll, or an explicit disconnect clears the diagnostic record.
+
+HTTP errors other than `504` raise `requests.HTTPError` in `RShellConnection.execute_command()`.
+Server-generated HTTP errors have an empty body, `rc: -1` and an `X-RShell-Error` header;
+they are not returned as successful command output.
+
 ### Diagnosing a timeout
 
 The EFI client runs every command through a blocking `os.system()` call and asks for new work only
@@ -1205,6 +1222,8 @@ From the caller side that is indistinguishable from a slow command: **every** la
 
 To make that visible the server tracks when each client last polled and which command it picked up,
 and returns the conclusion in the `X-RShell-Timeout-Reason` header, which `RShellConnection` logs:
+
+The header value is escaped to single-line ASCII and limited to 1024 characters.
 
 | Situation | Reported reason |
 | --- | --- |
@@ -1228,6 +1247,10 @@ from mfd_connect import RShellConnection
 conn = RShellConnection(ip="10.10.10.10", server_ip="10.10.10.1", default_timeout=2500)
 ```
 
+The fire-and-forget commands `end` and `reset*` return immediately, but must be picked up within
+the requested timeout (default 600 seconds) plus the 5-second client poll grace period.
+Undelivered commands are removed during subsequent requests, releasing their command and client slots.
+
 ### Server resource limits
 
 The server keeps its in-memory state bounded, so a long test session cannot exhaust RAM:
@@ -1239,6 +1262,8 @@ The server keeps its in-memory state bounded, so a long test session cannot exha
 | `MAX_ABANDONED_COMMAND_IDS` | `512` | Hard cap on remembered abandoned command IDs. |
 | `MAX_PENDING_COMMANDS_PER_CLIENT` | `256` | Hard cap on commands queued for a single client. |
 | `CLIENT_LIVENESS_TIMEOUT_SECONDS` | `300` | Silence after which `/health` reports the client as gone. |
+| `RUNNING_COMMAND_TTL_SECONDS` | `3600` | Age since pickup after which an unfinished-command diagnostic without an active waiter is evicted. |
+| `MAX_TIMEOUT_REASON_LENGTH` | `1024` | Maximum length of the ASCII-escaped timeout reason header. |
 
 Waiting for a result is event driven - the caller is woken up as soon as the output is posted,
 and all shared state is guarded by a lock because Werkzeug serves requests in threads.
