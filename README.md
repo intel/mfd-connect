@@ -1166,6 +1166,10 @@ If code cannot establish connection, it will start deployment of python using [D
 
 `RShellConnection` is a connection type that leverages `httplib.client` library to establish and manage connections using RESTful API over HTTP protocol in EFI Shell environment. `rshell_client.py` must be present on the EFI Shell target system.
 
+When `RShellConnection` starts a local server automatically, its stdout and stderr are discarded
+to prevent blocking on unread pipes. Command results still return through the HTTP API.
+For server diagnostics, start the server manually with output directed to a terminal or a managed log file.
+
 `rshell_server.py` is a server script that needs to be executed on the host machine to facilitate communication between the host and the EFI Shell target system. Server works on queue with address ip -> command to execute, it provides a RESTful API that allows the host to send commands and receive responses from the EFI Shell:
 
   * `/execute_command` - Endpoint to execute commands on the EFI Shell target system:
