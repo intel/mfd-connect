@@ -393,9 +393,3 @@ class RShellConnection(Connection):
                 raise RuntimeError("RShell server did not stop within timeout")
 
             logger.log(level=log_levels.MODULE_DEBUG, msg="RShell server stopped")
-            logger.log(
-                level=log_levels.MODULE_DEBUG,
-                msg=self.server_process.stdout_text
-                if self.server_process.stdout_text
-                else "RShell server had no stdout",
-            )

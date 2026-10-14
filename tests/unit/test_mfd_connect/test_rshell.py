@@ -169,6 +169,14 @@ class TestRShellConnection:
         process = rshell._run_server()
         try:
             assert process.wait(timeout=5) == 0
+            rshell.server_process = process
+            mocker.patch(
+                "mfd_connect.rshell.requests.post", return_value=Mock(status_code=200, text="", headers={"rc": "0"})
+            )
+            kill_process = mocker.patch("mfd_connect.rshell.kill_process_by_pid")
+            mocker.patch("mfd_connect.rshell.TimeoutCounter", return_value=False)
+            rshell.disconnect(stop_client=True, stop_server=True)
+            kill_process.assert_called_once_with(conn, process.pid)
         finally:
             if process.running:
                 process.stop(wait=5)
@@ -536,7 +544,10 @@ class TestRShellConnection:
         server_process = mocker.Mock()
         server_process.pid = 1234
         server_process.running = False
-        server_process.stdout_text = "server out"
+        stdout = mocker.PropertyMock(side_effect=AssertionError("Discarded stdout must not be read"))
+        stderr = mocker.PropertyMock(side_effect=AssertionError("Discarded stderr must not be read"))
+        type(server_process).stdout_text = stdout
+        type(server_process).stderr_text = stderr
         rshell.server_process = server_process
 
         rshell.stop_server()
@@ -544,3 +555,5 @@ class TestRShellConnection:
         local_connection.enable_sudo.assert_called_once()
         kill_process_by_pid.assert_called_once_with(local_connection, 1234)
         local_connection.disable_sudo.assert_called_once()
+        stdout.assert_not_called()
+        stderr.assert_not_called()
