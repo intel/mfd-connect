@@ -1173,6 +1173,17 @@ If code cannot establish connection, it will start deployment of python using [D
     * `timeout` - Timeout for command execution.
     * `command` - Command to be executed.
     * `ip` - IP address of the EFI Shell target system.
+
+    Responses:
+    * `200` - command output in the body, `rc` header holds the return code.
+    * `400` - no command provided.
+    * `413` - command output exceeds 16 MiB.
+    * `429` - a client or command admission limit was reached; existing commands are not evicted.
+    * `503` - pending results exceed the storage limit.
+    * `504` - the result did not arrive within `timeout` (+ client poll grace period). The body is empty
+      and `rc` is `-1`. Queued commands are removed and late results are discarded.
+      A command already picked up by the client may still execute; a timeout does not stop it.
+      The `X-RShell-Timeout-Reason` header explains *why* the wait failed (see below).
   * `/post_result` - Endpoint to post results back to the host.
     Headers fields:
     * `CommandID` - Unique identifier for the command.
@@ -1184,8 +1195,78 @@ If code cannot establish connection, it will start deployment of python using [D
     * `CommandID` - Unique identifier for the command.
     Body:
     * Exception details.
-  * `/getCommandToExecute` - Endpoint to retrieve commands to be executed on the EFI Shell target system. Returns commandline with generated CommandID.
-  * `/health/<ip>` - Endpoint to check the health status of the connection.
+  * `/getCommandToExecute` - Endpoint to retrieve commands to be executed on the EFI Shell target system. Returns commandline with generated CommandID. Commands abandoned after a timeout are skipped. Every poll also refreshes the client liveness marker.
+  * `/health/<ip>` - Reports `200` only when the client is known **and** polled within `CLIENT_LIVENESS_TIMEOUT_SECONDS`. A client that was seen once but went silent is reported as `503`, so a dead client no longer looks healthy for the rest of the run.
+  * `/disconnect_client/<ip>` - Removes the client and drops everything still queued for it.
+
+Results are removed after collection. Unknown, duplicate and abandoned results are not retained.
+The server accepts up to 256 clients, 512 active commands and 256 queued commands per client.
+Stored result payloads are limited to 64 MiB in total and 16 MiB per result, measured as UTF-8 bytes.
+Overflow is reported without truncating results or evicting another caller's result.
+Disconnecting clears the client's pending results and wakes its waiting callers.
+Idle client records are reclaimed during subsequent requests; actively awaited commands keep their client records.
+Unfinished-command diagnostics are retained separately, up to 256 records. Records without an active waiter
+expire one hour after pickup; the oldest such records may be evicted earlier to enforce the cap.
+Receiving the matching result, a new poll, or an explicit disconnect clears the diagnostic record.
+
+HTTP errors other than `504` raise `requests.HTTPError` in `RShellConnection.execute_command()`.
+Server-generated HTTP errors have an empty body, `rc: -1` and an `X-RShell-Error` header;
+they are not returned as successful command output.
+
+### Diagnosing a timeout
+
+The EFI client runs every command through a blocking `os.system()` call and asks for new work only
+after the previous command finished. A tool that hangs on the DUT - for example one that waits for a
+key press because it was not started in batch/silent mode - therefore stops the polling loop for good.
+From the caller side that is indistinguishable from a slow command: **every** later command times out.
+
+To make that visible the server tracks when each client last polled and which command it picked up,
+and returns the conclusion in the `X-RShell-Timeout-Reason` header, which `RShellConnection` logs:
+
+The header value is escaped to single-line ASCII and limited to 1024 characters.
+
+| Situation | Reported reason |
+| --- | --- |
+| Client never contacted the server | `has never contacted the server - check that rshell_client.py is running on the DUT` |
+| Client fetched this command and never came back | `picked this command up Ns ago and never reported back ... run it manually with output redirected to a file to check` |
+| Client stopped polling while running an earlier command | `stopped polling Ns ago ... still blocked executing '<command>' - the command most likely hangs on the DUT` |
+| Client keeps polling, command is just slow | `is alive and polling ... consider passing a bigger timeout` |
+
+The second and third rows point at the DUT, not at the server - no server-side change can make a
+hung EFI process return.
+
+### Timeouts
+
+`execute_command(timeout=...)` is forwarded to the server. When no timeout is given, the server falls
+back to `600` seconds and the connection logs that the fallback was applied. Set `default_timeout` on
+the connection for commands that legitimately run longer:
+
+```python
+from mfd_connect import RShellConnection
+
+conn = RShellConnection(ip="10.10.10.10", server_ip="10.10.10.1", default_timeout=2500)
+```
+
+The fire-and-forget commands `end` and `reset*` return immediately, but must be picked up within
+the requested timeout (default 600 seconds) plus the 5-second client poll grace period.
+Undelivered commands are removed during subsequent requests, releasing their command and client slots.
+
+### Server resource limits
+
+The server keeps its in-memory state bounded, so a long test session cannot exhaust RAM:
+
+| Constant | Default | Meaning |
+| --- | --- | --- |
+| `STALE_OUTPUT_TTL_SECONDS` | `600` | Age after which an uncollected output or abandoned ID is evicted. |
+| `MAX_STORED_OUTPUTS` | `512` | Hard cap on results waiting to be collected. |
+| `MAX_ABANDONED_COMMAND_IDS` | `512` | Hard cap on remembered abandoned command IDs. |
+| `MAX_PENDING_COMMANDS_PER_CLIENT` | `256` | Hard cap on commands queued for a single client. |
+| `CLIENT_LIVENESS_TIMEOUT_SECONDS` | `300` | Silence after which `/health` reports the client as gone. |
+| `RUNNING_COMMAND_TTL_SECONDS` | `3600` | Age since pickup after which an unfinished-command diagnostic without an active waiter is evicted. |
+| `MAX_TIMEOUT_REASON_LENGTH` | `1024` | Maximum length of the ASCII-escaped timeout reason header. |
+
+Waiting for a result is event driven - the caller is woken up as soon as the output is posted,
+and all shared state is guarded by a lock because Werkzeug serves requests in threads.
 
 `rshell.py` is a Connection class that calls RESTful API endpoints provided by `rshell_server.py` to execute commands on the EFI Shell target system. If required, starts `rshell_server.py` on the host machine.
 
@@ -1193,6 +1274,14 @@ RShell server can be started manually using the following command:
 ```bash
 python -m mfd_connect.rshell_server
 ```
+
+`rshell_client.py` runs on the DUT and accepts an optional source IP and source port:
+```bash
+rshell_client.py <server_ip> [source_ip] [source_port]
+```
+The source port defaults to `80`; override it when that fixed local port collides with sockets left
+in `TIME_WAIT` by earlier connections. A transient network error no longer terminates the client -
+it retries instead, so a single glitch cannot silence the DUT for the rest of the run.
 
 ## OS supported:
 * LNX

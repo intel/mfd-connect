@@ -107,6 +107,20 @@ def _run_client(monkeypatch, scenarios, argv, *, os_name="posix", with_httplib=F
 class TestRShellClientScript:
     """Tests for RShell client script behavior."""
 
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_client_retries_http_errors_without_executing_response(self, monkeypatch, status, capsys):
+        result = _run_client(
+            monkeypatch,
+            scenarios=[
+                {"status": status, "body": b"echo not-a-command"},
+                {"status": 200, "body": b"end", "command_id": "cid-end"},
+            ],
+            argv=["rshell_client.py", "127.0.0.1"],
+        )
+        assert not result["system_calls"]
+        assert result["instances"][0].closed
+        assert "HTTP {}".format(status) in capsys.readouterr().out
+
     def test_client_flow_with_no_command_then_end(self, monkeypatch):
         result = _run_client(
             monkeypatch,
