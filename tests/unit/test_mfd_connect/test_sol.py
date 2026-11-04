@@ -8,12 +8,19 @@ from textwrap import dedent
 import pexpect
 import pexpect.popen_spawn
 import pytest
+from mfd_typing.cpu_values import CPUArchitecture
 from mfd_typing.os_values import OSBitness, OSType, OSName
 from pytest import raises, fixture
 
 from mfd_connect import SolConnection
 from mfd_connect.base import ConnectionCompletedProcess
-from mfd_connect.exceptions import OsNotSupported, SolException
+from mfd_connect.exceptions import (
+    ConnectionCalledProcessError,
+    OsNotSupported,
+    SolException,
+    TextConsoleLoginPromptDetected,
+)
+from mfd_connect.sol import LOGIN_PROMPT_PATTERNS
 from mfd_connect.util.serial_utils import SerialKeyCode
 
 
@@ -31,6 +38,7 @@ class TestSolConnection:
         sol._prompt = ""
         sol._ip = "10.10.10.10"
         sol.cache_system_data = True
+        sol._login_prompt_patterns = list(LOGIN_PROMPT_PATTERNS)
         return sol
 
     def test_get_os_bitness_os_not_supported(self, sol, mocker):
@@ -52,6 +60,26 @@ class TestSolConnection:
             ),
         )
         assert sol.get_os_bitness() == OSBitness.OS_64BIT
+
+    def test_get_cpu_architecture_os_not_supported(self, sol, mocker):
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            return_value=ConnectionCompletedProcess(
+                return_code=0, args="command", stdout="random stuff", stderr="stderr"
+            ),
+        )
+        with raises(OsNotSupported):
+            sol.get_cpu_architecture()
+
+    def test_get_cpu_architecture_os_supported(self, sol, mocker):
+        real_correct_output = "Dell Custom UEFI Shell v2.2\nDell Build 2.6.1\nUEFI v2.70 (Dell Inc., 0x0A030201)"
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            return_value=ConnectionCompletedProcess(
+                return_code=0, args="command", stdout=real_correct_output, stderr="stderr"
+            ),
+        )
+        assert sol.get_cpu_architecture() == CPUArchitecture.X86_64
 
     def test_get_cwd(self, sol, mocker):
         sol.execute_command = mocker.create_autospec(
@@ -96,6 +124,241 @@ class TestSolConnection:
         sol.execute_command(
             "cmd arg1 arg2", discard_stdout=True, expected_return_codes=[0], custom_exception=self.CustomTestException
         )
+
+    # --- execute_command_detect_login() -----------------------------------------------------------------
+
+    def test_execute_command_detect_login_raises_value_error_on_discard_stdout_true(self, sol, mocker):
+        """discard_stdout=True must be rejected upfront - the login-prompt check needs the captured response."""
+        sol.execute_command = mocker.create_autospec(sol.execute_command)
+
+        with pytest.raises(ValueError):
+            sol.execute_command_detect_login("cmd", discard_stdout=True, shell=False)
+
+        sol.execute_command.assert_not_called()
+
+    def test_execute_command_detect_login_shell_true_raises_on_return_code_failure(self, sol, mocker):
+        """With shell=True, execute_command() computes and validates the return code itself - failure propagates."""
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            side_effect=ConnectionCalledProcessError(returncode=1, cmd="cmd", output="boom"),
+        )
+
+        with pytest.raises(ConnectionCalledProcessError):
+            sol.execute_command_detect_login("cmd", shell=True)
+
+        assert sol.execute_command.call_args.kwargs["shell"] is True
+
+    def test_execute_command_detect_login_accepts_shell_true(self, sol, mocker):
+        """shell=True must no longer be rejected - the result is simply returned on success."""
+        sentinel = ConnectionCompletedProcess(return_code=0, args="cmd", stdout="ok", stderr="")
+        sol.execute_command = mocker.create_autospec(sol.execute_command, return_value=sentinel)
+
+        result = sol.execute_command_detect_login("cmd", shell=True)
+
+        assert result is sentinel
+
+    def test_execute_command_detect_login_detects_login_prompt_with_shell_true(self, sol, mocker):
+        """The login-prompt check runs regardless of shell - it only inspects result.stdout."""
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            return_value=ConnectionCompletedProcess(return_code=0, args="whoami", stdout="myhost login: ", stderr=""),
+        )
+
+        with pytest.raises(TextConsoleLoginPromptDetected, match="login"):
+            sol.execute_command_detect_login("whoami", shell=True)
+
+    def test_execute_command_detect_login_is_a_thin_wrapper_around_execute_command(self, sol, mocker):
+        """execute_command_detect_login() must delegate to execute_command(), not reimplement it."""
+        sentinel = ConnectionCompletedProcess(return_code=0, args="cmd", stdout="out", stderr="")
+        sol.execute_command = mocker.create_autospec(sol.execute_command, return_value=sentinel)
+
+        result = sol.execute_command_detect_login(
+            "cmd arg1 arg2", cwd="dir", timeout=15, expected_return_codes=[0, 1], shell=False
+        )
+
+        assert result is sentinel
+        sol.execute_command.assert_called_once_with(
+            "cmd arg1 arg2",
+            input_data=None,
+            cwd="dir",
+            timeout=15,
+            env=None,
+            stderr_to_stdout=False,
+            discard_stdout=False,
+            discard_stderr=False,
+            skip_logging=False,
+            expected_return_codes=[0, 1],
+            shell=False,
+            custom_exception=None,
+        )
+
+    def test_execute_command_detect_login_returns_result_when_no_login_prompt(self, sol, mocker):
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            return_value=ConnectionCompletedProcess(return_code=0, args="whoami", stdout="root", stderr=""),
+        )
+
+        result = sol.execute_command_detect_login("whoami")
+
+        assert result.stdout == "root"
+
+    def test_execute_command_detect_login_shell_false_return_code_unavailable(self, sol, mocker):
+        """With shell=False (default), execute_command() never computes a return code - only a login prompt can fail."""
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            return_value=ConnectionCompletedProcess(return_code=None, args="whoami", stdout="root", stderr=""),
+        )
+
+        result = sol.execute_command_detect_login("whoami", expected_return_codes=[0])
+
+        assert result.stdout == "root"
+        with pytest.raises(NotImplementedError):
+            _ = result.return_code  # unavailable in shell=False mode - not a failure of this method
+
+    def test_execute_command_detect_login_raises_on_login_prompt(self, sol, mocker):
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            return_value=ConnectionCompletedProcess(return_code=0, args="whoami", stdout="myhost login: ", stderr=""),
+        )
+
+        with pytest.raises(TextConsoleLoginPromptDetected, match="login"):
+            sol.execute_command_detect_login("whoami")
+
+    def test_execute_command_detect_login_raises_on_password_prompt(self, sol, mocker):
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            return_value=ConnectionCompletedProcess(return_code=0, args="whoami", stdout="Password: ", stderr=""),
+        )
+
+        with pytest.raises(TextConsoleLoginPromptDetected):
+            sol.execute_command_detect_login("whoami")
+
+    def test_execute_command_detect_login_skips_login_prompt_check_on_empty_stdout(self, sol, mocker):
+        """An empty response has nothing to inspect - _find_login_prompt_match() must not even be called."""
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            return_value=ConnectionCompletedProcess(return_code=0, args="cmd", stdout="", stderr=""),
+        )
+        find_match = mocker.patch.object(sol, "_find_login_prompt_match")
+
+        result = sol.execute_command_detect_login("cmd")
+
+        assert result.stdout == ""
+        find_match.assert_not_called()
+
+    def test_execute_command_detect_login_propagates_execute_command_exception(self, sol, mocker):
+        """A failure raised by the delegated execute_command() call must propagate untouched."""
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            side_effect=ConnectionCalledProcessError(returncode=1, cmd="cmd", output="boom"),
+        )
+
+        with pytest.raises(ConnectionCalledProcessError):
+            sol.execute_command_detect_login("cmd")
+
+    # --- _find_login_prompt_match() -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "login: ",
+            "myhost login:",
+            "FreeBSD/amd64 (host) (ttyu0)\n\nlogin:",
+            "Username: ",
+            "Password: ",
+            "Password for user 'root': ",
+            "myhost Password:",
+        ],
+    )
+    def test_find_login_prompt_match_detects_known_patterns(self, sol, text):
+        assert sol._find_login_prompt_match(text) is not None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "root@host:~# ",
+            "FS0:\\> ",
+            "Shell> ",
+            "",
+            "command executed successfully",
+        ],
+    )
+    def test_find_login_prompt_match_no_match(self, sol, text):
+        assert sol._find_login_prompt_match(text) is None
+
+    def test_find_login_prompt_match_returns_first_matching_pattern(self, sol):
+        match = sol._find_login_prompt_match("some banner text\nlogin: ")
+
+        assert "login:" in match.group(0)
+
+    def test_find_login_prompt_match_uses_instance_patterns(self, sol):
+        """Instance-level patterns must be used (and be overridable) instead of the module constant directly."""
+        sol._login_prompt_patterns = [r"CUSTOM_PROMPT"]
+
+        assert sol._find_login_prompt_match("CUSTOM_PROMPT") is not None
+        # default module pattern no longer applies once overridden on the instance
+        assert sol._find_login_prompt_match("login: ") is None
+
+    # --- _raise_if_login_prompt() -------------------------------------------------------------------------
+
+    def test_raise_if_login_prompt_no_connection_handle_attribute(self, sol):
+        """Before a connection is established there's nothing to read - must return quietly."""
+        assert not hasattr(sol, "_connection_handle")
+
+        sol._raise_if_login_prompt()  # must not raise
+
+    def test_raise_if_login_prompt_connection_handle_is_none(self, sol):
+        sol._connection_handle = None
+
+        sol._raise_if_login_prompt()  # must not raise
+
+    def test_raise_if_login_prompt_tolerates_timeout(self, sol, mocker):
+        sol._connection_handle = mocker.Mock()
+        sol._connection_handle.read_nonblocking.side_effect = pexpect.TIMEOUT("timed out")
+
+        sol._raise_if_login_prompt()  # must not raise
+
+    def test_raise_if_login_prompt_tolerates_eof(self, sol, mocker):
+        sol._connection_handle = mocker.Mock()
+        sol._connection_handle.read_nonblocking.side_effect = pexpect.EOF("eof")
+
+        sol._raise_if_login_prompt()  # must not raise
+
+    def test_raise_if_login_prompt_no_match_does_not_raise(self, sol, mocker):
+        sol._connection_handle = mocker.Mock()
+        sol._connection_handle.read_nonblocking.return_value = b"FS0:\\> "
+
+        sol._raise_if_login_prompt()  # must not raise
+
+    def test_raise_if_login_prompt_detects_login_prompt(self, sol, mocker):
+        sol._connection_handle = mocker.Mock()
+        sol._connection_handle.read_nonblocking.return_value = b"myhost login: "
+
+        with pytest.raises(TextConsoleLoginPromptDetected):
+            sol._raise_if_login_prompt()
+
+    def test_raise_if_login_prompt_detects_password_prompt(self, sol, mocker):
+        sol._connection_handle = mocker.Mock()
+        sol._connection_handle.read_nonblocking.return_value = b"Password: "
+
+        with pytest.raises(TextConsoleLoginPromptDetected):
+            sol._raise_if_login_prompt()
+
+    def test_raise_if_login_prompt_passes_timeout_through(self, sol, mocker):
+        sol._connection_handle = mocker.Mock()
+        sol._connection_handle.read_nonblocking.return_value = b""
+
+        sol._raise_if_login_prompt(timeout=7)
+
+        sol._connection_handle.read_nonblocking.assert_called_once_with(size=5000, timeout=7)
+
+    def test_raise_if_login_prompt_default_timeout_is_two(self, sol, mocker):
+        sol._connection_handle = mocker.Mock()
+        sol._connection_handle.read_nonblocking.return_value = b""
+
+        sol._raise_if_login_prompt()
+
+        sol._connection_handle.read_nonblocking.assert_called_once_with(size=5000, timeout=2)
 
     def test_clear_buffer_with_pending_output(self, sol, mocker):
         sol._connection_handle = mocker.Mock(before=b"pending output")
@@ -553,12 +816,15 @@ class TestSolConnection:
             ),
         )
         assert sol._check_if_unix()
+        # shell=True is required for execute_command() to compute a return code at all
+        assert sol.execute_command.call_args.kwargs["shell"] is True
 
     def test__check_if_unix_failure(self, sol, mocker):
+        """Command runs but returns a non-zero code accepted by expected_return_codes (e.g. 127, not found)."""
         sol.execute_command = mocker.create_autospec(
             sol.execute_command,
             return_value=ConnectionCompletedProcess(
-                return_code=9009,
+                return_code=127,
                 args="command",
                 stdout=r"\'uname\' is not recognized as an internal or external command,"
                 r"\noperable program or batch file.",
@@ -566,6 +832,28 @@ class TestSolConnection:
             ),
         )
         assert not sol._check_if_unix()
+        assert sol.execute_command.call_args.kwargs["shell"] is True
+
+    def test__check_if_unix_catches_connection_called_process_error(self, sol, mocker):
+        """A return code outside expected_return_codes raises in execute_command() - the except branch must catch it."""
+        sol.execute_command = mocker.create_autospec(
+            sol.execute_command,
+            side_effect=ConnectionCalledProcessError(returncode=1, cmd="uname -a", output="boom"),
+        )
+        assert not sol._check_if_unix()
+
+    def test__check_if_unix_shell_true_computes_return_code(self, sol, mocker):
+        """execute_command() is not mocked directly here, so the real shell=True return-code computation runs."""
+        sol._send_to_shell = mocker.Mock()
+        sol.wait_for_string = mocker.Mock()
+        sol._clear_buffer = mocker.Mock()
+        sol._get_return_code = mocker.Mock(return_value=0)
+        sol._connection_handle = mocker.Mock(
+            before=b"Linux localhost.localdomain 5.3.15-200.fc30.x86_64 #1 SMP GNU/Linux"
+        )
+        sol._connection_handle.read_nonblocking.return_value = b""  # nothing pending for _raise_if_login_prompt()
+
+        assert sol._check_if_unix() is True  # must not raise NotImplementedError
 
     def test__check_if_efi_shell(self, sol, mocker):
         sol.execute_command = mocker.create_autospec(
@@ -786,6 +1074,8 @@ class TestSolConnection:
             ),
         )
         assert sol._get_unix_distribution() == os_name
+        # shell=True is required for execute_command() to compute a return code at all
+        assert sol.execute_command.call_args.kwargs["shell"] is True
 
     def test_get_unix_distribution_fail(self, sol, mocker):
         sol.execute_command = mocker.create_autospec(
@@ -799,6 +1089,17 @@ class TestSolConnection:
         )
         with raises(OsNotSupported):
             _ = sol._get_unix_distribution()
+
+    def test_get_unix_distribution_shell_true_computes_return_code(self, sol, mocker):
+        """execute_command() is not mocked directly here, so the real shell=True flow runs end-to-end."""
+        sol._send_to_shell = mocker.Mock()
+        sol.wait_for_string = mocker.Mock()
+        sol._clear_buffer = mocker.Mock()
+        sol._get_return_code = mocker.Mock(return_value=0)
+        sol._connection_handle = mocker.Mock(before=b"GNU/Linux")
+        sol._connection_handle.read_nonblocking.return_value = b""  # nothing pending for _raise_if_login_prompt()
+
+        assert sol._get_unix_distribution() == OSName.LINUX  # must not raise NotImplementedError
 
     def test_str_function(self, sol):
         assert str(sol) == "sol"

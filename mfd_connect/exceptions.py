@@ -81,6 +81,10 @@ class OsNotSupported(ModuleFrameworkDesignError):
     """Raises when OS is not supported."""
 
 
+class TextConsoleLoginPromptDetected(ModuleFrameworkDesignError):
+    """Raised when the SoL console is waiting on an interactive login prompt."""
+
+
 class CPUArchitectureNotSupported(ModuleFrameworkDesignError):
     """Raises when CPU Architecture is not supported."""
 
