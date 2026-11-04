@@ -5,6 +5,7 @@
 import codecs
 import logging
 import random
+import socket
 import sys
 from shlex import quote
 import time
@@ -136,6 +137,13 @@ class SSHConnection(AsyncConnection):
         :raises OsNotSupported: if os not found in available process classes
         """
         self._connection.connect(**self._connection_details, compress=True)
+        # Disable Nagle's algorithm on the transport socket. Without TCP_NODELAY the small
+        # exec/exit-status packets hit TCP delayed-ACK stalls (~40 ms each), roughly doubling
+        # per-command latency. This changes packet batching only - command semantics,
+        # timeouts, return codes and output are unaffected.
+        transport = self._connection.get_transport()
+        if transport is not None and transport.sock is not None:
+            transport.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         key_auth = str(self._connection.get_transport())
         if "awaiting auth" in key_auth:
             logger.log(level=log_levels.MODULE_DEBUG, msg="SSH server requested additional authentication")
