@@ -65,19 +65,19 @@ class SolConnection(Connection):
         """
         super().__init__(model=model, cache_system_data=cache_system_data)
         # checking existing of required tool
-        self._ipmi_tool_name = "ipmiutil"
+        self._ipmi_tool_name = "ipmitool"
         if "Windows" in platform.system():
             raise SolException("Windows is not supported as test controller, yet")
         try:
-            pexpect.popen_spawn.PopenSpawn(f"{self._ipmi_tool_name} -h").wait()
+            pexpect.popen_spawn.PopenSpawn(f"{self._ipmi_tool_name} -V").wait()
         except FileNotFoundError as e:
             logger.log(level=log_levels.MODULE_DEBUG, msg=f"{self._ipmi_tool_name} does not exists in OS")
             raise SolException(e)
         self._username = username
         self._password = password
         self._ip = IPAddress(ip)
-        # -F forcing lan type, -V privileges type (4 - admin)
-        self._ipmi_parameters = f"-F lan2 -U {self._username} -P {self._password} -N {self._ip} -V 4"
+        # -I interface (lanplus - IPMI v2.0 RMCP+), -H remote host, -L session privilege level
+        self._ipmi_parameters = f"-I lanplus -H {self._ip} -U {self._username} -P {self._password} -L ADMINISTRATOR"
         self._connection_handle = self._establish_connection(retry_count=5)
         self._prompt = [
             "\\\> \\x1b\[0m\\x1b\[37m\\x1b\[40m",  # noqa: W605
@@ -311,12 +311,12 @@ class SolConnection(Connection):
 
         # establishing new session
         logger.log(level=log_levels.MODULE_DEBUG, msg="Activating new SoL IPMI session...")
-        command = f"{self._ipmi_tool_name} sol -a {self._ipmi_parameters}"
+        command = f"{self._ipmi_tool_name} {self._ipmi_parameters} sol activate"
 
         # place for os dependency
         sol_connection_process = pexpect.spawn(command)
 
-        expected_strings = ["SOL session is running", pexpect.TIMEOUT, pexpect.EOF]
+        expected_strings = ["SOL Session operational", pexpect.TIMEOUT, pexpect.EOF]
         index_of_found_string = sol_connection_process.expect(expected_strings, timeout=10)
         if index_of_found_string != 0:
             if retry_count:
@@ -332,20 +332,17 @@ class SolConnection(Connection):
         """
         Clear/deactivate previous SoL IPMI session before opening a new one.
 
-        Retries graceful deactivation via ipmiutil, then falls back to killing
-        defunct ipmiutil process(es) if all attempts fail.
+        Retries graceful deactivation via ipmitool, then falls back to killing
+        defunct ipmitool process(es) if all attempts fail.
 
         :param retry_count: Number of graceful deactivation attempts
         :raises SolException: if graceful deactivation and fallback cleanup fail
         """
         logger.log(level=log_levels.MODULE_DEBUG, msg="Clearing/Deactivating previous SoL IPMI session...")
-        # Both patterns below signal a successful deactivation (either the session was closed,
-        # or there was none to close in the first place) - pexpect.expect() raises TIMEOUT/EOF
-        # if neither is matched, so a returned index always means success.
-        correct_responses = [
-            "completed successfully",
-            "Invalid Session Handle or Empty Buffer",
-        ]
+        # 'ipmitool sol deactivate' prints nothing and returns 0 on success.
+        # When there is no active session it reports that the payload is already de-activated,
+        # which is also treated as a success.
+        already_deactivated_response = "SOL payload already de-activated"
 
         for attempt in range(1, retry_count + 1):
             logger.log(
@@ -355,9 +352,11 @@ class SolConnection(Connection):
             process = None
             try:
                 process = pexpect.popen_spawn.PopenSpawn(
-                    f"{self._ipmi_tool_name} sol -d {self._ipmi_parameters}", timeout=60
+                    f"{self._ipmi_tool_name} {self._ipmi_parameters} sol deactivate", timeout=60
                 )
-                process.expect(correct_responses)
+                process.expect(pexpect.EOF)
+                output = process.before.decode("ASCII", errors="ignore") if process.before else ""
+                return_code = process.wait()
             except (OSError, pexpect.TIMEOUT, pexpect.EOF) as e:
                 logger.log(
                     level=log_levels.MODULE_DEBUG,
@@ -374,6 +373,14 @@ class SolConnection(Connection):
                         pass
                 continue
 
+            if return_code != 0 and already_deactivated_response not in output:
+                logger.log(
+                    level=log_levels.MODULE_DEBUG,
+                    msg=f"Attempt {attempt}/{retry_count}: {self._ipmi_tool_name} failed to deactivate "
+                    f"SoL session (rc={return_code}): {output.strip()}",
+                )
+                continue
+
             logger.log(level=log_levels.MODULE_DEBUG, msg="...Done - previous SoL session deactivated.")
             return
 
@@ -382,18 +389,18 @@ class SolConnection(Connection):
             msg=f"Could not gracefully deactivate SoL session after {retry_count} attempt(s). "
             f"Trying to locate and kill defunct {self._ipmi_tool_name} process(es)...",
         )
-        self._kill_defunct_ipmiutil_processes()
+        self._kill_defunct_ipmitool_processes()
 
-    def _kill_defunct_ipmiutil_processes(self) -> None:
+    def _kill_defunct_ipmitool_processes(self) -> None:
         """
-        Find and kill defunct/stopped ipmiutil process(es).
+        Find and kill defunct/stopped ipmitool process(es).
 
         Process listing uses 'ps -o pid,stat --no-headers -C <tool_name>': '-C <name>'
         selects processes by command name and, on its own, already overrides the default
         "only same-terminal processes" restriction of 'ps', matching system-wide.
 
         Only processes in STAT='T' (stopped by job control signal) are considered defunct
-        and killed, healthy ipmiutil is usually 'S' or 'S+' (interruptible sleep).
+        and killed, healthy ipmitool is usually 'S' or 'S+' (interruptible sleep).
 
         Finding no defunct process is not treated as fatal, it simply means there's
         nothing to clean up.
@@ -599,7 +606,8 @@ class SolConnection(Connection):
         if one_line:
             return cleaned_string
         lines = cleaned_string.split("\r\r\n")
-        output_lines = [line for line in lines if "" != line and "'~?' for help.]" not in line]
+        # skip empty lines and ipmitool banner: "[SOL Session operational.  Use ~? for help]"
+        output_lines = [line for line in lines if "" != line and "SOL Session operational" not in line]
         # skip _prompt line
         pattern = re.compile(r"FS\d:\\.*")
         if not output_lines:
