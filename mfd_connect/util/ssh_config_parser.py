@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Utility for parsing ~/.ssh/config and resolving Host mnemonics."""
 
+import fnmatch
 import getpass
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,10 +65,28 @@ def _parse_proxy_jump_hop(hop_spec: str) -> tuple[str, str | None, int | None]:
     return spec, user_override, port_override
 
 
+def _has_host_entry(mnemonic: str, ssh_config: paramiko.SSHConfig) -> bool:
+    """Check whether a ``Host`` block other than the catch-all ``*`` matches the mnemonic.
+
+    Wildcard patterns such as ``lab-*`` count as a match, the same way OpenSSH applies them.
+
+    :param mnemonic: Host alias to look up.
+    :param ssh_config: Parsed paramiko SSHConfig.
+    :return: True if a specific Host pattern matches.
+    """
+    for pattern in ssh_config.get_hostnames():
+        if pattern == "*" or pattern.startswith("!"):
+            continue
+        if fnmatch.fnmatch(mnemonic, pattern):
+            return True
+    return False
+
+
 def resolve_host(
     mnemonic: str,
     ssh_config: paramiko.SSHConfig,
     _visited: set[str] | None = None,
+    _require_entry: bool = True,
 ) -> SSHHostConfig:
     """Recursively resolve a Host mnemonic from SSH config.
 
@@ -77,6 +96,8 @@ def resolve_host(
     :param mnemonic: Host alias from ~/.ssh/config.
     :param ssh_config: Parsed paramiko SSHConfig.
     :param _visited: Internal set for circular ProxyJump detection.
+    :param _require_entry: Internal flag; ProxyJump hops may be plain hostnames or IPs
+                           that have no Host block of their own, as OpenSSH allows.
     :return: Fully resolved SSHHostConfig with proxy chain.
     :raises ValueError: If mnemonic not found or circular ProxyJump detected.
     """
@@ -91,8 +112,7 @@ def resolve_host(
 
     # If hostname equals the mnemonic and there is no explicit config entry,
     # the mnemonic was not found in the config file.
-    available_hosts = ssh_config.get_hostnames()
-    if mnemonic not in available_hosts and hostname == mnemonic:
+    if _require_entry and hostname == mnemonic and not _has_host_entry(mnemonic, ssh_config):
         raise ValueError(f"Host mnemonic '{mnemonic}' not found in SSH config")
 
     user = lookup.get("user", getpass.getuser())
@@ -100,6 +120,9 @@ def resolve_host(
     identity_file = lookup.get("identityfile", [])
     strict = lookup.get("stricthostkeychecking", "yes") != "no"
     proxy_jump_raw = lookup.get("proxyjump")
+    if proxy_jump_raw and proxy_jump_raw.strip().lower() == "none":
+        # "ProxyJump none" disables jumping, e.g. for the bastion itself under "Host *".
+        proxy_jump_raw = None
 
     host_config = SSHHostConfig(
         hostname=hostname,
@@ -115,7 +138,7 @@ def resolve_host(
         chain: list[SSHHostConfig] = []
         for hop_spec in reversed(hops):
             mnemonic, user_override, port_override = _parse_proxy_jump_hop(hop_spec)
-            hop_config = resolve_host(mnemonic, ssh_config, set(_visited))
+            hop_config = resolve_host(mnemonic, ssh_config, set(_visited), _require_entry=False)
             if user_override:
                 hop_config.user = user_override
             if port_override is not None:

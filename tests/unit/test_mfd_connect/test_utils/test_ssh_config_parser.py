@@ -69,6 +69,20 @@ def ssh_config_file(tmp_path: Path) -> Path:
             User root
             ProxyJump deployer@jump-host:2222
             StrictHostKeyChecking no
+
+        Host no-jump-host
+            HostName 10.40.40.40
+            User admin
+            ProxyJump none
+
+        Host literal-hop
+            HostName 172.16.0.250
+            User root
+            ProxyJump ops@10.50.50.50:2200
+
+        Host lab-*
+            User labuser
+            ProxyJump jump-host
     """)
     config_file = tmp_path / "config"
     config_file.write_text(config_content)
@@ -193,6 +207,36 @@ class TestResolveHost:
         assert hop.hostname == "10.20.20.20"  # jump-host's HostName
         assert hop.user == "deployer"  # overridden from ProxyJump
         assert hop.port == 2222  # overridden from ProxyJump
+
+    def test_resolve_proxy_jump_none_means_no_jump(self, parsed_config: paramiko.SSHConfig) -> None:
+        """Test that "ProxyJump none" disables jumping instead of being looked up as a host."""
+        result = resolve_host("no-jump-host", parsed_config)
+        assert result.hostname == "10.40.40.40"
+        assert result.proxy_jump is None
+        assert result.proxy_chain == []
+
+    def test_resolve_proxy_jump_literal_host(self, parsed_config: paramiko.SSHConfig) -> None:
+        """Test that a ProxyJump hop without its own Host block is used as a hostname."""
+        result = resolve_host("literal-hop", parsed_config)
+        assert len(result.proxy_chain) == 1
+        hop = result.proxy_chain[0]
+        assert hop.hostname == "10.50.50.50"
+        assert hop.user == "ops"
+        assert hop.port == 2200
+
+    def test_resolve_wildcard_host_pattern(self, parsed_config: paramiko.SSHConfig) -> None:
+        """Test that a mnemonic matched by a wildcard Host pattern is resolved."""
+        result = resolve_host("lab-7", parsed_config)
+        assert result.hostname == "lab-7"
+        assert result.user == "labuser"
+        assert [hop.hostname for hop in result.proxy_chain] == ["10.20.20.20"]
+
+    def test_resolve_unknown_host_with_catch_all_block_raises_value_error(self, tmp_path: Path) -> None:
+        """Test that a "Host *" block alone does not make every mnemonic resolvable."""
+        config_file = tmp_path / "config"
+        config_file.write_text("Host *\n    User someone\n")
+        with pytest.raises(ValueError, match="not found in SSH config"):
+            resolve_host("typo-host", parse_ssh_config(config_file))
 
 
 class TestSSHHostConfig:
